@@ -21,10 +21,12 @@ core = static_library('composite_core', files('src/subcarrier.c', 'src/encode.c'
 
 shared_module('composite',
     files('src/composite.c'),
+    dependencies: m_dep,
     gnu_symbol_visibility: 'hidden',
     include_directories: incdir,
     install: true,
     install_dir: py.get_install_dir() / 'vapoursynth/plugins',
+    link_with: core,
     name_prefix: '',
 )
 
