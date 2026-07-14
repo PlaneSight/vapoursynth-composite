@@ -1,0 +1,11 @@
+build*/
+__pycache__/
+subprojects/checkasm/
+
+# local dev documents; the repository carries shippable code only
+/CLAUDE.md
+/TODO.md
+/ROADMAP.md
+/project_state.yaml
+/docs/
+*Zone.Identifier
