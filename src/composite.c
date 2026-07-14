@@ -12,10 +12,7 @@
 #include <VapourSynth4.h>
 #include <VSHelper4.h>
 
-enum {
-    COMP_STD_PAL,
-    COMP_STD_NTSC,
-};
+#include "subcarrier.h"
 
 typedef struct comp_filter_t comp_filter_t;
 

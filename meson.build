@@ -12,6 +12,11 @@ incdir = include_directories(
     run_command(py, '-c', 'import vapoursynth as vs; print(vs.get_include())', check: true).stdout().strip(),
 )
 
+core = static_library('composite_core', files('src/subcarrier.c'),
+    gnu_symbol_visibility: 'hidden',
+    pic: true,
+)
+
 shared_module('composite',
     files('src/composite.c'),
     gnu_symbol_visibility: 'hidden',
@@ -20,3 +25,10 @@ shared_module('composite',
     install_dir: py.get_install_dir() / 'vapoursynth/plugins',
     name_prefix: '',
 )
+
+test('subcarrier', executable('test_subcarrier',
+    files('test/test_subcarrier.c'),
+    dependencies: meson.get_compiler('c').find_library('m', required: false),
+    include_directories: include_directories('src'),
+    link_with: core,
+))
