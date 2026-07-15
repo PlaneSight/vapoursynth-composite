@@ -46,6 +46,7 @@ int comp_transform3d_init(comp_transform3d_t *t, double threshold, int standard,
         return -1;
     t->standard = standard;
     t->level = !!level;
+    t->use_lut = 0;
     for (int i = 0; i < COMP_T3D_NTHRESH; i++)
         t->threshold_sq[i] = (float)(threshold * threshold);
 
@@ -71,6 +72,14 @@ int comp_transform3d_init(comp_transform3d_t *t, double threshold, int standard,
     return 0;
 }
 
+void comp_transform3d_set_lut(comp_transform3d_t *t, const double *v)
+{
+    for (int b = 0; b < COMP_T3D_NTHRESH; b++)
+        for (int k = 0; k < COMP_LUT_K; k++)
+            t->lut[b][k] = (float)v[b * COMP_LUT_K + k];
+    t->use_lut = 1;
+}
+
 void comp_transform3d_free(comp_transform3d_t *t)
 {
     pthread_mutex_lock(&planner_lock);
@@ -81,6 +90,18 @@ void comp_transform3d_free(comp_transform3d_t *t)
     pthread_mutex_unlock(&planner_lock);
     t->forward = NULL;
     t->inverse = NULL;
+}
+
+/* gain from a per-bin LUT row: linear interpolation over the
+ * pair-symmetry ratio, knots uniform on [0, 1] */
+static inline float lut_gain(const float *row, float lo, float hi)
+{
+    const float r = hi > 0.0f ? lo / hi : 1.0f;
+    const float pos = r * (COMP_LUT_K - 1);
+    int k = (int)pos;
+    if (k > COMP_LUT_K - 2)
+        k = COMP_LUT_K - 2;
+    return row[k] + (row[k + 1] - row[k]) * (pos - k);
 }
 
 static void apply_filter(const comp_transform3d_t *t,
@@ -112,6 +133,18 @@ static void apply_filter(const comp_transform3d_t *t,
                 const float m_in_sq = bi[x][0] * bi[x][0] + bi[x][1] * bi[x][1];
                 const float m_ref_sq = bi_ref[x_ref][0] * bi_ref[x_ref][0]
                                      + bi_ref[x_ref][1] * bi_ref[x_ref][1];
+
+                if (t->use_lut) {
+                    const int bin = (int)(tsq - t->threshold_sq) - 1;
+                    const float lo = m_in_sq < m_ref_sq ? m_in_sq : m_ref_sq;
+                    const float hi = m_in_sq < m_ref_sq ? m_ref_sq : m_in_sq;
+                    const float g = lut_gain(t->lut[bin], lo, hi);
+                    bo[x][0] = bi[x][0] * g;
+                    bo[x][1] = bi[x][1] * g;
+                    bo_ref[x_ref][0] = bi_ref[x_ref][0] * g;
+                    bo_ref[x_ref][1] = bi_ref[x_ref][1] * g;
+                    continue;
+                }
 
                 if (t->level) {
                     /* set the larger of the pair to the smaller, phase

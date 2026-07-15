@@ -315,6 +315,22 @@ static void VS_CC comp_decode_create(const VSMap *in, VSMap *out, void *user_dat
     if (level && d.standard == COMP_STD_NTSC && !transform)
         RETERROR("level=1 needs transform=1 for ntsc");
 
+    const int nlut = vsapi->mapNumElements(in, "lut");
+    if (nlut > 0) {
+        if (d.standard != COMP_STD_PAL)
+            RETERROR("lut is Transform PAL only");
+        if (level)
+            RETERROR("lut and level are mutually exclusive");
+        if (dimensions == 2 && nlut != COMP_T2D_NTHRESH * COMP_LUT_K)
+            RETERROR("dimensions=2 needs 1280 lut values (80 bins x 16 knots)");
+        if (dimensions == 3 && nlut != COMP_T3D_NTHRESH * COMP_LUT_K)
+            RETERROR("dimensions=3 needs 12288 lut values (768 bins x 16 knots)");
+        if (dimensions == 1)
+            RETERROR("lut needs dimensions 2 or 3");
+        if (vsapi->mapNumElements(in, "thresholds") > 0)
+            RETERROR("lut and thresholds are mutually exclusive");
+    }
+
     if (!vsh_isConstantVideoFormat(&d.vi))
         RETERROR("clip must have constant format and dimensions");
     if (d.vi.format.colorFamily != cfGray || d.vi.format.sampleType != stInteger
@@ -364,6 +380,14 @@ static void VS_CC comp_decode_create(const VSMap *in, VSMap *out, void *user_dat
             if (!(tv[i] > 0.0 && tv[i] <= 1.0))
                 RETERROR("thresholds must be in (0, 1]");
         comp_decode_set_thresholds(d.dec, tv, nthresh);
+    }
+
+    if (nlut > 0) {
+        const double *lv = vsapi->mapGetFloatArray(in, "lut", &err);
+        for (int i = 0; i < nlut; i++)
+            if (!(lv[i] >= 0.0 && lv[i] <= 1.0))
+                RETERROR("lut values must be in [0, 1]");
+        comp_decode_set_lut(d.dec, lv, nlut);
     }
 
     vsapi->queryVideoFormat(&d.vi.format, cfYUV, stInteger, 16, 0, 0, core);
@@ -474,6 +498,22 @@ static void VS_CC comp_restore_create(const VSMap *in, VSMap *out, void *user_da
     if (level && d.standard == COMP_STD_NTSC && !transform)
         RETERROR("level=1 needs transform=1 for ntsc");
 
+    const int nlut = vsapi->mapNumElements(in, "lut");
+    if (nlut > 0) {
+        if (d.standard != COMP_STD_PAL)
+            RETERROR("lut is Transform PAL only");
+        if (level)
+            RETERROR("lut and level are mutually exclusive");
+        if (dimensions == 2 && nlut != COMP_T2D_NTHRESH * COMP_LUT_K)
+            RETERROR("dimensions=2 needs 1280 lut values (80 bins x 16 knots)");
+        if (dimensions == 3 && nlut != COMP_T3D_NTHRESH * COMP_LUT_K)
+            RETERROR("dimensions=3 needs 12288 lut values (768 bins x 16 knots)");
+        if (dimensions == 1)
+            RETERROR("lut needs dimensions 2 or 3");
+        if (vsapi->mapNumElements(in, "thresholds") > 0)
+            RETERROR("lut and thresholds are mutually exclusive");
+    }
+
     if (!vsh_isConstantVideoFormat(&d.vi))
         RETERROR("clip must have constant format and dimensions");
     if (d.vi.format.colorFamily != cfYUV)
@@ -575,6 +615,14 @@ static void VS_CC comp_restore_create(const VSMap *in, VSMap *out, void *user_da
         comp_decode_set_thresholds(d.dec, tv, nthresh);
     }
 
+    if (nlut > 0) {
+        const double *lv = vsapi->mapGetFloatArray(in, "lut", &err);
+        for (int i = 0; i < nlut; i++)
+            if (!(lv[i] >= 0.0 && lv[i] <= 1.0))
+                RETERROR("lut values must be in [0, 1]");
+        comp_decode_set_lut(d.dec, lv, nlut);
+    }
+
     vsapi->queryVideoFormat(&d.vi.format, cfYUV, stInteger, 16, 0, 0, core);
     d.in_frames = d.vi.numFrames;
 
@@ -636,7 +684,8 @@ VS_EXTERNAL_API(void) VapourSynthPluginInit2(VSPlugin *plugin, const VSPLUGINAPI
                              "eq:int:opt;"
                              "thresholds:float[]:opt;"
                              "transform:int:opt;"
-                             "level:int:opt;",
+                             "level:int:opt;"
+                             "lut:float[]:opt;",
                              "clip:vnode;",
                              comp_decode_create, (void *)"Decode", plugin);
     vspapi->registerFunction("Restore",
@@ -651,7 +700,8 @@ VS_EXTERNAL_API(void) VapourSynthPluginInit2(VSPlugin *plugin, const VSPLUGINAPI
                              "thresholds:float[]:opt;"
                              "precomb:int:opt;"
                              "transform:int:opt;"
-                             "level:int:opt;",
+                             "level:int:opt;"
+                             "lut:float[]:opt;",
                              "clip:vnode;",
                              comp_restore_create, (void *)"Restore", plugin);
 }

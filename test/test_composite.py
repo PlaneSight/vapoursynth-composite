@@ -287,4 +287,35 @@ for bad_kw, needle in ((dict(level=1, dimensions=1), 'dimensions 2 or 3'),
     else:
         assert False, f'expected error: {needle}'
 
+# ---- trained soft LUT: all-ones keeps everything; validation errors
+lut1 = core.composite.Decode(enc_t, lut=[1.0] * 1280)
+fr = lut1.get_frame(0)
+for pl, want in enumerate((30000, 40960, 28672)):
+    vals = [fr[pl][r, x] for r in (100, 288, 475) for x in range(48, 312, 8)]
+    worst = max(abs(v - want) for v in vals)
+    assert worst <= 96, ('pal2d-lut', pl, want, worst)
+core.composite.Decode(enc_t, lut=[1.0] * 12288, dimensions=3).get_frame(0)
+core.composite.Restore(tex, lut=[1.0] * 1280).get_frame(0)
+for bad_kw, needle in ((dict(lut=[1.0] * 100), '1280'),
+                       (dict(lut=[1.0] * 100, dimensions=3), '12288'),
+                       (dict(lut=[1.0] * 1280, level=1), 'mutually exclusive'),
+                       (dict(lut=[1.0] * 1280, thresholds=[0.4] * 80),
+                        'mutually exclusive'),
+                       (dict(lut=[2.0] * 1280), '[0, 1]'),
+                       (dict(lut=[1.0] * 1280, dimensions=1), 'dimensions 2 or 3')):
+    try:
+        core.composite.Decode(enc_t, **bad_kw)
+    except vs.Error as e:
+        assert needle in str(e), (needle, str(e))
+    else:
+        assert False, f'expected error: {needle}'
+try:
+    core.composite.Decode(core.composite.Encode(bff, standard='ntsc'),
+                          standard='ntsc', dimensions=3, transform=1,
+                          lut=[1.0] * 12288)
+except vs.Error as e:
+    assert 'Transform PAL only' in str(e)
+else:
+    assert False, 'lut accepted for ntsc'
+
 print('test_composite: all tests passed')

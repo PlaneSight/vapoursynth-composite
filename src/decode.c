@@ -268,6 +268,21 @@ int comp_decode_set_thresholds(comp_decode_t *d, const double *t, int n)
     return -1;
 }
 
+int comp_decode_set_lut(comp_decode_t *d, const double *v, int n)
+{
+    if (d->standard != COMP_STD_PAL)
+        return -1;
+    if (d->dimensions == 2 && n == COMP_T2D_NTHRESH * COMP_LUT_K) {
+        comp_transform2d_set_lut(&d->transform, v);
+        return 0;
+    }
+    if (d->dimensions == 3 && n == COMP_T3D_NTHRESH * COMP_LUT_K) {
+        comp_transform3d_set_lut(&d->transform3, v);
+        return 0;
+    }
+    return -1;
+}
+
 int comp_decode_look(const comp_decode_t *d)
 {
     if (d->dimensions != 3)

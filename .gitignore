@@ -1,6 +1,7 @@
 build*/
 __pycache__/
 subprojects/checkasm/
+threshold_hists_*.npz
 
 # local dev documents; the repository carries shippable code only
 /CLAUDE.md

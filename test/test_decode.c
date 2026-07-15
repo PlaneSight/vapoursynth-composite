@@ -401,6 +401,56 @@ static void test_pal2d_roundtrip(int level)
     comp_decode_free(&dec);
 }
 
+/* an all-ones LUT keeps every candidate pair at unit gain, which is
+ * exactly what a vanishing threshold does: the two modes must agree
+ * bit for bit */
+static void test_lut(void)
+{
+    comp_encode_t enc;
+    comp_decode_t dec_th, dec_lut;
+    static uint16_t outy2[H][W], outu2[H][W], outv2[H][W];
+    static double ones[COMP_T2D_NTHRESH * COMP_LUT_K];
+
+    for (int i = 0; i < COMP_T2D_NTHRESH * COMP_LUT_K; i++)
+        ones[i] = 1.0;
+
+    CHECK(comp_encode_init(&enc, COMP_STD_PAL, 0, 0) == 0, "lut encode init");
+    /* threshold so small its float square is 0: keeps every pair */
+    CHECK(comp_decode_init(&dec_th, COMP_STD_PAL, 1e-30, 1, 0, 2, 0, 0, 0, 0) == 0,
+          "lut threshold init");
+    CHECK(comp_decode_init(&dec_lut, COMP_STD_PAL, 0.4, 1, 0, 2, 0, 0, 0, 0) == 0,
+          "lut decode init");
+    CHECK(comp_decode_set_lut(&dec_lut, ones, COMP_T2D_NTHRESH * COMP_LUT_K) == 0,
+          "set_lut");
+    CHECK(comp_decode_set_lut(&dec_lut, ones, 100) != 0,
+          "wrong lut size must be rejected");
+
+    for (int r = 0; r < H; r++)
+        comp_encode_line(&enc, comp[r], srcy[r], srcu[r], srcv[r],
+                         comp_sc_line(COMP_STD_PAL, 0, r));
+
+    const comp_frame_view_t v = { comp[0], W };
+    const int vf = 0;
+    comp_decode_frame(&dec_th, 0, 1, H, 0, &v, &vf, 0, NULL, 0,
+                      outy[0], W, outu[0], W, outv[0], W);
+    comp_decode_frame(&dec_lut, 0, 1, H, 0, &v, &vf, 0, NULL, 0,
+                      outy2[0], W, outu2[0], W, outv2[0], W);
+
+    CHECK(!memcmp(outy, outy2, sizeof(outy)) && !memcmp(outu, outu2, sizeof(outu))
+          && !memcmp(outv, outv2, sizeof(outv)),
+          "all-ones lut must match a vanishing threshold exactly");
+
+    comp_decode_free(&dec_th);
+    comp_decode_free(&dec_lut);
+
+    comp_decode_t dec_n;
+    CHECK(comp_decode_init(&dec_n, COMP_STD_NTSC, 0.4, 1, 0, 3, 0, 0, 1, 0) == 0,
+          "ntsc transform init");
+    CHECK(comp_decode_set_lut(&dec_n, ones, COMP_T3D_NTHRESH * COMP_LUT_K) != 0,
+          "lut on ntsc must be rejected");
+    comp_decode_free(&dec_n);
+}
+
 int main(void)
 {
     comp_decode_t dec;
@@ -413,6 +463,7 @@ int main(void)
 
     test_pal2d_roundtrip(0);
     test_pal2d_roundtrip(1);
+    test_lut();  /* reuses the pattern test_pal2d_roundtrip fills in */
 
     test_ntsc_roundtrip(0, 486, 0);
     test_ntsc_roundtrip(1, 486, 0);

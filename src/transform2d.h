@@ -18,20 +18,30 @@
 #define COMP_T2D_NTHRESH (COMP_T2D_YCOMPLEX * (COMP_T2D_XTILE / 4 - COMP_T2D_XTILE / 8 + 1))
 #define COMP_T2D_YCOMPLEX COMP_T2D_YTILE
 
+/* soft-gain LUT: per-bin gain over the pair-symmetry ratio, knots
+ * uniformly spaced on [0, 1], linearly interpolated */
+#define COMP_LUT_K 16
+
 typedef struct comp_transform2d_t comp_transform2d_t;
 
 struct comp_transform2d_t {
     fftwf_plan forward;
     fftwf_plan inverse;
     int level;
+    int use_lut;
     float window[COMP_T2D_YTILE][COMP_T2D_XTILE];
     float threshold_sq[COMP_T2D_NTHRESH];
+    float lut[COMP_T2D_NTHRESH][COMP_LUT_K];
 };
 
 /* threshold is the bin-symmetry ratio, (0,1]; 0.4 is the reference
  * default. level selects amplitude limiting instead: each bin pair has
  * the larger magnitude set to the smaller (threshold then unused). */
 int comp_transform2d_init(comp_transform2d_t *t, double threshold, int level);
+
+/* install a trained per-bin soft-gain LUT (COMP_T2D_NTHRESH * COMP_LUT_K
+ * values in [0,1], knots innermost), replacing the pair test */
+void comp_transform2d_set_lut(comp_transform2d_t *t, const double *v);
 void comp_transform2d_free(comp_transform2d_t *t);
 
 /* Extract the chroma component of one field of active-picture composite.

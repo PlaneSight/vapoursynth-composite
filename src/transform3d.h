@@ -6,6 +6,8 @@
 
 #include <fftw3.h>
 
+#include "transform2d.h"  /* COMP_LUT_K */
+
 /* Overlapping-tile geometry: XTILE samples by YTILE frame lines by
  * ZTILE fields, advancing by half a tile in each direction. */
 #define COMP_T3D_XTILE    16
@@ -34,8 +36,10 @@ struct comp_transform3d_t {
     fftwf_plan inverse;
     int standard;
     int level;
+    int use_lut;
     float window[COMP_T3D_ZTILE][COMP_T3D_YTILE][COMP_T3D_XTILE];
     float threshold_sq[COMP_T3D_NTHRESH];
+    float lut[COMP_T3D_NTHRESH][COMP_LUT_K];
 };
 
 /* PAL chroma is symmetric about (fsc, 72 c/aph, 18.75 Hz); the NTSC
@@ -47,6 +51,10 @@ struct comp_transform3d_t {
 int comp_transform3d_init(comp_transform3d_t *t, double threshold, int standard,
                           int level);
 void comp_transform3d_free(comp_transform3d_t *t);
+
+/* install a trained per-bin soft-gain LUT (COMP_T3D_NTHRESH * COMP_LUT_K
+ * values in [0,1], knots innermost), replacing the pair test; PAL only */
+void comp_transform3d_set_lut(comp_transform3d_t *t, const double *v);
 
 /* Extract the chroma of the two fields of output frame `frame`.
  * fields[] holds views of the absolute field indices [z0, z0 + nfields);

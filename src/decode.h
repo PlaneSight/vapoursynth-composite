@@ -75,6 +75,10 @@ void comp_decode_free(comp_decode_t *d);
  * COMP_T2D_NTHRESH (dimensions=2) or COMP_T3D_NTHRESH (dimensions=3) */
 int comp_decode_set_thresholds(comp_decode_t *d, const double *t, int n);
 
+/* install a trained per-bin soft-gain LUT (Transform PAL only),
+ * replacing the pair test; n must be the bin count * COMP_LUT_K */
+int comp_decode_set_lut(comp_decode_t *d, const double *v, int n);
+
 /* source frames needed each side of the decoded frame */
 int comp_decode_look(const comp_decode_t *d);
 

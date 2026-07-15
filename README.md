@@ -23,7 +23,7 @@ Alpha. PAL and NTSC round trips work:
   U/V across same-field lines before modulation (Poynton's precombing) —
   useful when encoding clean sources for comb decoders, but leave it off
   in the noise-reduction round trip, where it measurably hurts.
-- `composite.Decode(clip[, standard, width, threshold, setup, dimensions, eq, thresholds, transform, level])`
+- `composite.Decode(clip[, standard, width, threshold, setup, dimensions, eq, thresholds, transform, level, lut])`
   — composite back to YUV444P16, resampled to `width` (default 720). PAL
   uses Transform PAL chroma separation with PALcolour-style demodulation
   (`threshold` is the transform's bin-symmetry ratio); NTSC uses an
@@ -47,8 +47,16 @@ Alpha. PAL and NTSC round trips work:
   pair's larger magnitude is reduced to the smaller, per GB 2365247 A):
   measurably better on moving content and on real footage, at the cost
   of a slightly softer separation on static synthetic detail;
-  `threshold`/`thresholds` are unused in this mode.
-- `composite.Restore(clip[, standard, width, threshold, setup, dimensions, eq, refine, thresholds, precomb, transform, level])`
+  `threshold`/`thresholds` are unused in this mode. `lut` installs a
+  trained soft separation (Transform PAL only): per frequency bin, a
+  gain over the pair-symmetry ratio — 16 knots per bin, linearly
+  interpolated, so 1280 values for dimensions=2 and 12288 for 3 —
+  replacing the keep/discard test entirely (after US 7,872,689).
+  test/calibrate_thresholds.py derives the table from a clean corpus in
+  closed form (per-cell Wiener gains from encoder-linearity energy
+  labels); test/lut_pal_2d.txt is a set trained on the VQEG 625-line
+  corpus.
+- `composite.Restore(clip[, standard, width, threshold, setup, dimensions, eq, refine, thresholds, precomb, transform, level, lut])`
   — the whole noise-reduction round trip in one call. `refine` (default
   1) runs that many analysis-by-synthesis iterations that deconvolve a
   crude-decoder model against the input picture, recovering luma detail

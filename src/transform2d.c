@@ -41,6 +41,7 @@ int comp_transform2d_init(comp_transform2d_t *t, double threshold, int level)
     if (!(threshold > 0.0 && threshold <= 1.0))
         return -1;
     t->level = !!level;
+    t->use_lut = 0;
     for (int i = 0; i < COMP_T2D_NTHRESH; i++)
         t->threshold_sq[i] = (float)(threshold * threshold);
 
@@ -65,6 +66,14 @@ int comp_transform2d_init(comp_transform2d_t *t, double threshold, int level)
     return 0;
 }
 
+void comp_transform2d_set_lut(comp_transform2d_t *t, const double *v)
+{
+    for (int b = 0; b < COMP_T2D_NTHRESH; b++)
+        for (int k = 0; k < COMP_LUT_K; k++)
+            t->lut[b][k] = (float)v[b * COMP_LUT_K + k];
+    t->use_lut = 1;
+}
+
 void comp_transform2d_free(comp_transform2d_t *t)
 {
     pthread_mutex_lock(&planner_lock);
@@ -77,6 +86,18 @@ void comp_transform2d_free(comp_transform2d_t *t)
     t->inverse = NULL;
 }
 
+/* gain from a per-bin LUT row: linear interpolation over the
+ * pair-symmetry ratio, knots uniform on [0, 1] */
+static inline float lut_gain(const float *row, float lo, float hi)
+{
+    const float r = hi > 0.0f ? lo / hi : 1.0f;
+    const float pos = r * (COMP_LUT_K - 1);
+    int k = (int)pos;
+    if (k > COMP_LUT_K - 2)
+        k = COMP_LUT_K - 2;
+    return row[k] + (row[k + 1] - row[k]) * (pos - k);
+}
+
 /* Keep only bins that look like chroma: modulated chroma is symmetric
  * about the carrier at (fsc, 72 c/aph) = (XTILE/4, YTILE/4). In
  * threshold mode, compare each candidate bin's squared magnitude with
@@ -84,7 +105,8 @@ void comp_transform2d_free(comp_transform2d_t *t)
  * threshold ratio. In level mode, set the larger of the pair to the
  * smaller, phase preserved (GB 2365247 A): true chroma pairs have
  * equal magnitudes and pass unchanged, so only asymmetric (luma)
- * energy is reduced. */
+ * energy is reduced. With a trained LUT, each pair gets a per-bin
+ * gain looked up from its symmetry ratio (US 7,872,689). */
 static void apply_filter(const comp_transform2d_t *t,
                          const fftwf_complex *in, fftwf_complex *out)
 {
@@ -114,6 +136,18 @@ static void apply_filter(const comp_transform2d_t *t,
             const float m_in_sq = bi[x][0] * bi[x][0] + bi[x][1] * bi[x][1];
             const float m_ref_sq = bi_ref[x_ref][0] * bi_ref[x_ref][0]
                                  + bi_ref[x_ref][1] * bi_ref[x_ref][1];
+
+            if (t->use_lut) {
+                const int bin = (int)(tsq - t->threshold_sq) - 1;
+                const float lo = m_in_sq < m_ref_sq ? m_in_sq : m_ref_sq;
+                const float hi = m_in_sq < m_ref_sq ? m_ref_sq : m_in_sq;
+                const float g = lut_gain(t->lut[bin], lo, hi);
+                bo[x][0] = bi[x][0] * g;
+                bo[x][1] = bi[x][1] * g;
+                bo_ref[x_ref][0] = bi_ref[x_ref][0] * g;
+                bo_ref[x_ref][1] = bi_ref[x_ref][1] * g;
+                continue;
+            }
 
             if (t->level) {
                 float f_in = 1.0f, f_ref = 1.0f;
