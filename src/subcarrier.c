@@ -5,7 +5,21 @@
  * from double arithmetic to exact integers.
  */
 
+#include <math.h>
+
 #include "subcarrier.h"
+
+#ifndef M_PI
+#define M_PI 3.14159265358979323846
+#endif
+
+void comp_sc_sin_q15(int den, int16_t *table)
+{
+    for (int k = 0; k < den; k++) {
+        const long v = lrint(sin(2.0 * M_PI * k / den) * 32768.0);
+        table[k] = (int16_t)(v > 32767 ? 32767 : v);
+    }
+}
 
 comp_sc_line_t comp_sc_line(int standard, int frame, int row)
 {

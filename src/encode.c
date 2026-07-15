@@ -6,13 +6,7 @@
  * Floating point is used only to fill the sine table here.
  */
 
-#include <math.h>
-
 #include "encode.h"
-
-#ifndef M_PI
-#define M_PI 3.14159265358979323846
-#endif
 
 /* 1.3 MHz low-pass Gaussian for U/V at 4xfsc [Clarke 3.2.4: >= -3 dB at
  * 1.3 MHz, <= -20 dB at 4.0 MHz]: ld-chroma-encoder's 13 taps
@@ -44,10 +38,7 @@ int comp_encode_init(comp_encode_t *e, int standard)
     e->standard = standard;
     e->width = COMP_ACTIVE_WIDTH_PAL;
     e->den = COMP_SC_DEN_PAL;
-    for (int k = 0; k < e->den; k++) {
-        const long v = lrint(sin(2.0 * M_PI * k / e->den) * 32768.0);
-        e->sin_q15[k] = (int16_t)(v > 32767 ? 32767 : v);
-    }
+    comp_sc_sin_q15(e->den, e->sin_q15);
     return 0;
 }
 

@@ -5,9 +5,6 @@
 
 #include "subcarrier.h"
 
-#define COMP_ACTIVE_WIDTH_PAL  928
-#define COMP_ACTIVE_HEIGHT_PAL 576
-
 typedef struct comp_encode_t comp_encode_t;
 
 struct comp_encode_t {

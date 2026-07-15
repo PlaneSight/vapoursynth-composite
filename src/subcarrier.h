@@ -1,10 +1,16 @@
 #ifndef COMP_SUBCARRIER_H
 #define COMP_SUBCARRIER_H
 
+#include <stdint.h>
+
 enum {
     COMP_STD_PAL,
     COMP_STD_NTSC,
 };
+
+/* active-picture raster at 4xfsc */
+#define COMP_ACTIVE_WIDTH_PAL  928
+#define COMP_ACTIVE_HEIGHT_PAL 576
 
 /* At 4xfsc the subcarrier advances exactly 1/4 cycle per sample, so a
  * line's phase is fully described by its start phase, which is an exact
@@ -21,5 +27,8 @@ struct comp_sc_line_t {
 
 /* row is 0-based within the active picture: 576 lines PAL, 486 NTSC */
 comp_sc_line_t comp_sc_line(int standard, int frame, int row);
+
+/* fill table[0..den-1] with sin(2*pi*k/den) in Q15, +1.0 clamped to 32767 */
+void comp_sc_sin_q15(int den, int16_t *table);
 
 #endif
