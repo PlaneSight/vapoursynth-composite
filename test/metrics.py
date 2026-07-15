@@ -271,13 +271,16 @@ def main():
                 configs = [('NR 2D t=0.4', dict(dimensions=2, threshold=0.4)),
                            ('NR 2D eq=0', dict(dimensions=2, eq=0)),
                            ('NR 2D t=0.7', dict(dimensions=2, threshold=0.7)),
+                           ('NR 2D level', dict(dimensions=2, level=1)),
                            ('NR 3D t=0.4', dict(dimensions=3, threshold=0.4)),
-                           ('NR 3D t=0.7', dict(dimensions=3, threshold=0.7))]
+                           ('NR 3D t=0.7', dict(dimensions=3, threshold=0.7)),
+                           ('NR 3D level', dict(dimensions=3, level=1))]
             else:
                 configs = [('NR 2D', dict(dimensions=2)),
                            ('NR 2D eq=0', dict(dimensions=2, eq=0)),
                            ('NR 3D', dict(dimensions=3)),
-                           ('NR 3D transform', dict(dimensions=3, transform=1))]
+                           ('NR 3D transform', dict(dimensions=3, transform=1)),
+                           ('NR 3D tf level', dict(dimensions=3, transform=1, level=1))]
             for cname, kw in configs:
                 nr = to_array(core.composite.Decode(recomp, standard=standard, **kw))
                 print(fmt(cname, score(nr, clean)))
@@ -295,6 +298,12 @@ def main():
             transparent = to_array(core.composite.Decode(
                 core.composite.Encode(clean_clip, standard=standard), standard=standard))
             print(fmt('transparency 2D', score(transparent, clean)))
+
+            if standard == 'pal':
+                transparent_lv = to_array(core.composite.Decode(
+                    core.composite.Encode(clean_clip, standard=standard),
+                    standard=standard, level=1))
+                print(fmt('transparency 2D level', score(transparent_lv, clean)))
 
 
 if __name__ == '__main__':
