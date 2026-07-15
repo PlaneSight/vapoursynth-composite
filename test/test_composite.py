@@ -196,6 +196,33 @@ for pl in range(3):
 rest_n = core.composite.Restore(bff, standard='ntsc', dimensions=3)
 assert (rest_n.width, rest_n.height) == (720, 480)
 rest_n.get_frame(1)
+# ---- Transform NTSC 3D: round-trips, param validation
+bff9 = core.std.SetFrameProps(
+    core.std.BlankClip(format=vs.YUV444P16, width=720, height=480, length=9,
+                       fpsnum=30000, fpsden=1001, color=[32128, 40960, 28672]),
+    _FieldBased=1)
+ntf = core.composite.Decode(core.composite.Encode(bff9, standard='ntsc'),
+                            standard='ntsc', dimensions=3, transform=1)
+fr = ntf.get_frame(4)
+for pl, want in enumerate((32128, 40960, 28672)):
+    vals = [fr[pl][r, x] for r in (30, 240, 445) for x in range(64, 656, 8)]
+    worst = max(abs(v - want) for v in vals)
+    assert worst <= 96, ('ntsc-transform3d', pl, want, worst)
+try:
+    core.composite.Decode(core.composite.Encode(flat([126, 128, 128], fmt=vs.YUV420P8)),
+                          transform=1, dimensions=3)
+except vs.Error as e:
+    assert 'ntsc' in str(e)
+else:
+    assert False, 'transform=1 accepted for pal'
+try:
+    core.composite.Decode(core.composite.Encode(bff, standard='ntsc'),
+                          standard='ntsc', transform=1)
+except vs.Error as e:
+    assert 'dimensions=3' in str(e)
+else:
+    assert False, 'transform without dimensions=3 accepted'
+
 # ---- precomb: flat chroma unchanged, vertical chroma detail differs
 flat_pc = core.composite.Encode(flat([30000, 40960, 28672]))
 flat_pc1 = core.composite.Encode(flat([30000, 40960, 28672]), precomb=1)

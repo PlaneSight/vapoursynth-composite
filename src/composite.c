@@ -298,6 +298,15 @@ static void VS_CC comp_decode_create(const VSMap *in, VSMap *out, void *user_dat
 
 
 
+
+    int transform = vsapi->mapGetIntSaturated(in, "transform", 0, &err);
+    if (err)
+        transform = 0;
+    if (transform && d.standard != COMP_STD_NTSC)
+        RETERROR("transform=1 applies to ntsc (pal always uses the transform)");
+    if (transform && dimensions != 3)
+        RETERROR("transform=1 needs dimensions=3");
+
     if (!vsh_isConstantVideoFormat(&d.vi))
         RETERROR("clip must have constant format and dimensions");
     if (d.vi.format.colorFamily != cfGray || d.vi.format.sampleType != stInteger
@@ -324,7 +333,7 @@ static void VS_CC comp_decode_create(const VSMap *in, VSMap *out, void *user_dat
         RETERROR("out of memory");
     if (comp_decode_init(d.dec, d.standard, threshold,
                          info.numThreads < 1 ? 1 : info.numThreads, setup,
-                         dimensions, eq, 0)) {
+                         dimensions, eq, 0, transform)) {
         free(d.dec);
         d.dec = NULL;
         RETERROR("decoder initialisation failed");
@@ -439,6 +448,14 @@ static void VS_CC comp_restore_create(const VSMap *in, VSMap *out, void *user_da
 
     const int precomb = !!vsapi->mapGetIntSaturated(in, "precomb", 0, &err);
 
+    int transform = vsapi->mapGetIntSaturated(in, "transform", 0, &err);
+    if (err)
+        transform = 0;
+    if (transform && d.standard != COMP_STD_NTSC)
+        RETERROR("transform=1 applies to ntsc (pal always uses the transform)");
+    if (transform && dimensions != 3)
+        RETERROR("transform=1 needs dimensions=3");
+
 
     if (!vsh_isConstantVideoFormat(&d.vi))
         RETERROR("clip must have constant format and dimensions");
@@ -516,7 +533,7 @@ static void VS_CC comp_restore_create(const VSMap *in, VSMap *out, void *user_da
         RETERROR("out of memory");
     if (comp_decode_init(d.dec, d.standard, threshold,
                          info.numThreads < 1 ? 1 : info.numThreads, setup,
-                         dimensions, eq, refine)) {
+                         dimensions, eq, refine, transform)) {
         free(d.dec);
         d.dec = NULL;
         RETERROR("decoder initialisation failed");
@@ -598,7 +615,8 @@ VS_EXTERNAL_API(void) VapourSynthPluginInit2(VSPlugin *plugin, const VSPLUGINAPI
                              "setup:int:opt;"
                              "dimensions:int:opt;"
                              "eq:int:opt;"
-                             "thresholds:float[]:opt;",
+                             "thresholds:float[]:opt;"
+                             "transform:int:opt;",
                              "clip:vnode;",
                              comp_decode_create, (void *)"Decode", plugin);
     vspapi->registerFunction("Restore",
@@ -611,7 +629,8 @@ VS_EXTERNAL_API(void) VapourSynthPluginInit2(VSPlugin *plugin, const VSPLUGINAPI
                              "eq:int:opt;"
                              "refine:int:opt;"
                              "thresholds:float[]:opt;"
-                             "precomb:int:opt;",
+                             "precomb:int:opt;"
+                             "transform:int:opt;",
                              "clip:vnode;",
                              comp_restore_create, (void *)"Restore", plugin);
 }

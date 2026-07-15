@@ -35,6 +35,7 @@ typedef struct comp_decode_t comp_decode_t;
 struct comp_decode_t {
     int standard;
     int dimensions;      /* 1 (crude notch), 2, or 3 */
+    int use_transform;   /* NTSC 3D: transform separation, not the comb */
     int refine;          /* Y-only Landweber iterations, 0 = off */
     int width;
     int height;          /* full raster height: 576 PAL, 486 NTSC */
@@ -60,11 +61,13 @@ struct comp_decode_t {
 
 /* nscratch is the maximum number of concurrent frame requests. setup
  * selects the NTSC 7.5 IRE pedestal; threshold is Transform PAL's
- * bin-symmetry ratio; each is ignored by the other standard. eq enables
- * the chroma cascade equalizer; refine is the number of Y-only
- * Landweber refinement iterations against the dimensions=1 model. */
+ * bin-symmetry ratio. eq enables the chroma cascade equalizer; refine
+ * is the number of Y-only Landweber refinement iterations against the
+ * dimensions=1 model; use_transform selects Transform NTSC separation
+ * instead of the comb (NTSC, dimensions=3 only). */
 int comp_decode_init(comp_decode_t *d, int standard, double threshold,
-                     int nscratch, int setup, int dimensions, int eq, int refine);
+                     int nscratch, int setup, int dimensions, int eq, int refine,
+                     int use_transform);
 void comp_decode_free(comp_decode_t *d);
 
 /* override the Transform PAL per-bin thresholds after init; n must be

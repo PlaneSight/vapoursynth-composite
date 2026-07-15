@@ -92,9 +92,12 @@ static void design_eq(comp_decode_t *d, const int16_t *enc_taps, int enc_n,
 }
 
 int comp_decode_init(comp_decode_t *d, int standard, double threshold,
-                     int nscratch, int setup, int dimensions, int eq, int refine)
+                     int nscratch, int setup, int dimensions, int eq, int refine,
+                     int use_transform)
 {
     if (nscratch < 1 || dimensions < 1 || dimensions > 3 || refine < 0)
+        return -1;
+    if (use_transform && (standard != COMP_STD_NTSC || dimensions != 3))
         return -1;
 
     memset(d, 0, sizeof(*d));
@@ -108,6 +111,7 @@ int comp_decode_init(comp_decode_t *d, int standard, double threshold,
     d->refine = refine;
     d->standard = standard;
     d->dimensions = dimensions;
+    d->use_transform = !!use_transform;
     d->eq = !!eq;
     d->width = enc.width;
     d->height = standard == COMP_STD_PAL ? COMP_ACTIVE_HEIGHT_PAL
@@ -162,7 +166,7 @@ int comp_decode_init(comp_decode_t *d, int standard, double threshold,
         }
 
         if (dimensions == 2 ? comp_transform2d_init(&d->transform, threshold)
-                            : comp_transform3d_init(&d->transform3, threshold))
+                            : comp_transform3d_init(&d->transform3, threshold, standard))
             return -1;
     } else if (standard == COMP_STD_PAL) {
         /* dimensions=1 uses the crude path only */
@@ -175,6 +179,9 @@ int comp_decode_init(comp_decode_t *d, int standard, double threshold,
     } else {
         /* the comb's adaptivity range: 45 IRE of the encoded span */
         d->comb_krange = (int32_t)lrint(45.0 * (0xC800 - d->level_black) / 100.0);
+
+        if (use_transform && comp_transform3d_init(&d->transform3, threshold, standard))
+            return -1;
 
         if (eq) {
             double prof[COLORLP_TAPS];
@@ -233,7 +240,7 @@ void comp_decode_free(comp_decode_t *d)
         pthread_mutex_destroy(&d->lock);
         pthread_cond_destroy(&d->cond);
     }
-    if (d->standard == COMP_STD_PAL) {
+    if (d->standard == COMP_STD_PAL || d->use_transform) {
         if (d->dimensions == 2)
             comp_transform2d_free(&d->transform);
         else if (d->dimensions == 3)
@@ -243,7 +250,7 @@ void comp_decode_free(comp_decode_t *d)
 
 int comp_decode_set_thresholds(comp_decode_t *d, const double *t, int n)
 {
-    if (d->standard != COMP_STD_PAL)
+    if (d->standard != COMP_STD_PAL && !d->use_transform)
         return -1;
     if (d->dimensions == 2 && n == COMP_T2D_NTHRESH) {
         for (int i = 0; i < n; i++)
@@ -251,6 +258,7 @@ int comp_decode_set_thresholds(comp_decode_t *d, const double *t, int n)
         return 0;
     }
     if (d->dimensions == 3 && n == COMP_T3D_NTHRESH) {
+        /* for NTSC these feed the shaped-threshold exponent */
         for (int i = 0; i < n; i++)
             d->transform3.threshold_sq[i] = (float)(t[i] * t[i]);
         return 0;
@@ -262,7 +270,7 @@ int comp_decode_look(const comp_decode_t *d)
 {
     if (d->dimensions != 3)
         return 0;
-    return d->standard == COMP_STD_PAL ? COMP_T3D_LOOK : 1;
+    return (d->standard == COMP_STD_PAL || d->use_transform) ? COMP_T3D_LOOK : 1;
 }
 
 static comp_decode_scratch_t *scratch_acquire(comp_decode_t *d)
@@ -654,12 +662,17 @@ static void ntsc_demod_line(const comp_decode_t *d, int frame, int raster_row,
         u_row[x] = ul;
         v_row[x] = vl;
 
-        /* comb.cpp adjustY: subtract the filtered chroma, resynthesized
-         * on the carrier, rather than the raw comb output; this must use
-         * the chroma as the encoder sent it, so it taps the values
-         * before equalization */
-        const int32_t re = (ul * s4[x & 3] + vl * c4[x & 3] + 16384) >> 15;
-        const int32_t yl = (int32_t)comp_row[x] - re;
+        /* comb mode follows comb.cpp adjustY (subtract the filtered
+         * chroma resynthesized on the carrier, using the values before
+         * equalization); transform mode subtracts the separated chroma
+         * directly, as Transform PAL does */
+        int32_t yl;
+        if (d->use_transform) {
+            yl = (int32_t)comp_row[x] - chroma_row[x];
+        } else {
+            const int32_t re = (ul * s4[x & 3] + vl * c4[x & 3] + 16384) >> 15;
+            yl = (int32_t)comp_row[x] - re;
+        }
         outy[x] = clamp_u16(4096 + rdiv((int64_t)(yl - d->level_black) * d->luma_num, d->luma_den));
     }
 
@@ -846,7 +859,7 @@ void comp_decode_frame(comp_decode_t *d, int frame, int nframes,
                 fields[i].stride = 2 * views[k].stride;
             }
             comp_transform3d_frame(&d->transform3, fields, z0, nfields,
-                                   frame, w, frows,
+                                   frame, 0, w, frows,
                                    s->chroma_f, s->chroma_f + w, 2 * w);
         }
 
@@ -862,8 +875,33 @@ void comp_decode_frame(comp_decode_t *d, int frame, int nframes,
         }
     } else {
         /* the comb works on frame rows directly: ±2 rows are the same
-         * field's neighbouring lines */
-        if (d->dimensions == 2) {
+         * field's neighboring lines */
+        if (d->use_transform) {
+            comp_field_view_t fields[COMP_T3D_ZTILE + COMP_T3D_ZTILE / 2];
+            const int fout = frame * 2;
+            const int tz_hi = ((fout + 1) / (COMP_T3D_ZTILE / 2)) * (COMP_T3D_ZTILE / 2);
+            const int z0 = tz_hi - COMP_T3D_ZTILE / 2;
+            const int nfields = COMP_T3D_ZTILE + COMP_T3D_ZTILE / 2;
+
+            const int parity = (row_off + 1) & 1;
+            for (int i = 0; i < nfields; i++) {
+                const int g = z0 + i;
+                if (g < 0 || g >= 2 * nframes) {
+                    fields[i].data = NULL;
+                    fields[i].stride = 0;
+                    continue;
+                }
+                int k = g / 2 - (frame - look);
+                k = k < 0 ? 0 : k > 2 * look ? 2 * look : k;
+                fields[i].data = views[k].data + ((g ^ parity) & 1) * views[k].stride;
+                fields[i].stride = 2 * views[k].stride;
+            }
+            comp_transform3d_frame(&d->transform3, fields, z0, nfields,
+                                   frame, parity, w, rows / 2,
+                                   s->chroma_f, s->chroma_f + w, 2 * w);
+            for (int i = 0; i < w * rows; i++)
+                s->chroma[i] = clamp_i16(lrintf(s->chroma_f[i]));
+        } else if (d->dimensions == 2) {
             ntsc_comb1d(d, rows, comp, comp_stride, s->chroma_f);
             ntsc_comb2d(d, rows, s->chroma_f, s->tmp3);
             for (int i = 0; i < w * rows; i++)

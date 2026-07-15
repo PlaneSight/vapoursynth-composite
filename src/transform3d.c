@@ -15,6 +15,7 @@
 #include <pthread.h>
 #include <string.h>
 
+#include "subcarrier.h"
 #include "transform3d.h"
 
 #ifndef M_PI
@@ -38,10 +39,11 @@ static double compute_window(int element, int limit)
     return 0.5 - 0.5 * cos((2.0 * M_PI * (element + 0.5)) / limit);
 }
 
-int comp_transform3d_init(comp_transform3d_t *t, double threshold)
+int comp_transform3d_init(comp_transform3d_t *t, double threshold, int standard)
 {
     if (!(threshold > 0.0 && threshold <= 1.0))
         return -1;
+    t->standard = standard;
     for (int i = 0; i < COMP_T3D_NTHRESH; i++)
         t->threshold_sq[i] = (float)(threshold * threshold);
 
@@ -122,9 +124,127 @@ static void apply_filter(const comp_transform3d_t *t,
     }
 }
 
+
+static inline float dist_sq3(float a, float b, float c)
+{
+    return a * a + b * b + c * c;
+}
+
+/* NTSC frequency-domain filter, ported from the ld-decode transform-ntsc
+ * branch (TransformNtsc3D). NTSC's U and V share one carrier, so chroma
+ * is only approximately symmetric about it; the test compensates with a
+ * frequency-shaped threshold (lenient near the chroma carrier at
+ * (fsc, 120 c/aph, 15 Hz), strict near luma) and cross-checks each
+ * candidate against the energy at its demodulated-luma positions k±c
+ * (chroma with no corresponding luma is suspect). */
+static void apply_filter_ntsc(const comp_transform3d_t *t,
+                              const fftwf_complex *in, fftwf_complex *out)
+{
+    const float *tsq = t->threshold_sq;
+
+    memset(out, 0, sizeof(fftwf_complex) * TILE_CPLX);
+
+    for (int z = 0; z < ZTILE; z++) {
+        const int z_ref = ((ZTILE / 2) + ZTILE - z) % ZTILE;
+        const int z_lr = (z - ZTILE / 4 + ZTILE) % ZTILE;
+        const int z_lrn = (ZTILE - z_lr) % ZTILE;
+        const float kz0 = (float)z / ZTILE;
+
+        for (int y = 0; y < YTILE; y++) {
+            const int y_ref = ((YTILE / 2) + YTILE - y) % YTILE;
+            const int y_lr = (y - YTILE / 4 + YTILE) % YTILE;
+            const int y_lrn = (YTILE - y_lr) % YTILE;
+            const float ky0 = (float)y / YTILE;
+
+            /* map (ky, kz) into the interlace-equivalence diamond */
+            float ky = ky0, kz = kz0;
+            if (kz0 + ky0 < 0.5f) {
+                kz = kz0 + 0.5f;
+                ky = ky0 + 0.5f;
+            } else if (kz0 + ky0 > 1.5f) {
+                kz = kz0 - 0.5f;
+                ky = ky0 - 0.5f;
+            } else if (kz0 - ky0 > 0.5f) {
+                kz = kz0 - 0.5f;
+                ky = ky0 + 0.5f;
+            } else if (ky0 - kz0 > 0.5f) {
+                kz = kz0 + 0.5f;
+                ky = ky0 - 0.5f;
+            }
+            if (kz + ky > 1.0f) {
+                kz = 1.0f - kz;
+                ky = 1.0f - ky;
+            }
+
+            const fftwf_complex *bi = in + (z * YTILE + y) * XC;
+            const fftwf_complex *bi_ref = in + (z_ref * YTILE + y_ref) * XC;
+            const fftwf_complex *bi_lr = in + (z_lr * YTILE + y_lr) * XC;
+            const fftwf_complex *bi_lrn = in + (z_lrn * YTILE + y_lrn) * XC;
+            fftwf_complex *bo = out + (z * YTILE + y) * XC;
+            fftwf_complex *bo_ref = out + (z_ref * YTILE + y_ref) * XC;
+
+            for (int x = XTILE / 8; x <= XTILE / 4; x++) {
+                const int x_ref = (XTILE / 2) - x;
+                const int x_lr = x - XTILE / 4;
+                const float kx = (float)x / XTILE;
+                const float t0_sq = *tsq++;
+
+                const fftwf_complex *lr1, *lr2;
+                if (x_lr >= 0) {
+                    lr1 = &bi_lr[x_lr];
+                    lr2 = &bi_lrn[XTILE / 2 - x_lr];
+                } else {
+                    lr1 = &bi_lrn[-x_lr];
+                    lr2 = &bi_lr[XTILE / 2 + x_lr];
+                }
+
+                if (x == x_ref) {
+                    if ((y == YTILE / 4 && z == ZTILE / 4)
+                        || (y == 3 * YTILE / 4 && z == 3 * ZTILE / 4)) {
+                        /* its own reflection and a carrier: keep */
+                        bo[x][0] = bi[x][0];
+                        bo[x][1] = bi[x][1];
+                        continue;
+                    }
+                    if (((y == 0 || y == YTILE / 2) && (z == 0 || z == ZTILE / 2))
+                        || (y == YTILE / 4 && z == 3 * ZTILE / 4)
+                        || (y == 3 * YTILE / 4 && z == ZTILE / 4)) {
+                        /* its own reflection but not a carrier: discard */
+                        continue;
+                    }
+                }
+
+                /* threshold shaped by proximity to chroma vs luma */
+                const float k_luma = dist_sq3(kz - 0.5f, ky - 0.5f, kx);
+                const float k_chroma = dist_sq3(kz - 0.25f, ky - 0.25f, kx - 0.25f);
+                float th_sq = powf(k_chroma / (k_luma + k_chroma), 10.0f * t0_sq);
+
+                const float m_in = bi[x][0] * bi[x][0] + bi[x][1] * bi[x][1];
+                const float m_ref = bi_ref[x_ref][0] * bi_ref[x_ref][0]
+                                  + bi_ref[x_ref][1] * bi_ref[x_ref][1];
+                const float l1 = (*lr1)[0] * (*lr1)[0] + (*lr1)[1] * (*lr1)[1];
+                const float l2 = (*lr2)[0] * (*lr2)[0] + (*lr2)[1] * (*lr2)[1];
+                const float m_luma = l1 > l2 ? l1 : l2;
+                const float m_max = m_in > m_ref ? m_in : m_ref;
+
+                if (m_luma < m_max * th_sq)
+                    th_sq = 0.5f * (1.0f + th_sq);
+
+                if (m_in < m_ref * th_sq || m_ref < m_in * th_sq)
+                    continue;
+
+                bo[x][0] = bi[x][0];
+                bo[x][1] = bi[x][1];
+                bo_ref[x_ref][0] = bi_ref[x_ref][0];
+                bo_ref[x_ref][1] = bi_ref[x_ref][1];
+            }
+        }
+    }
+}
+
 void comp_transform3d_frame(const comp_transform3d_t *t,
                             const comp_field_view_t *fields, int z0, int nfields,
-                            int frame, int width, int field_rows,
+                            int frame, int parity, int width, int field_rows,
                             float *chroma0, float *chroma1, ptrdiff_t chroma_stride)
 {
     float real[TILE_REAL];
@@ -162,7 +282,7 @@ void comp_transform3d_frame(const comp_transform3d_t *t,
                     for (int y = 0; y < YTILE; y++) {
                         const int fl = tile_y + y;
                         const int usable = fv && y >= start_y && y < end_y
-                                           && (fl & 1) == (g & 1);
+                                           && ((fl + parity) & 1) == (g & 1);
                         const uint16_t *b = usable
                             ? fv->data + (fl >> 1) * fv->stride : NULL;
                         float *dst = &real[(z * YTILE + y) * XTILE];
@@ -175,7 +295,10 @@ void comp_transform3d_frame(const comp_transform3d_t *t,
                 }
                 fftwf_execute_dft_r2c(t->forward, real, cplx_in);
 
-                apply_filter(t, cplx_in, cplx_out);
+                if (t->standard == COMP_STD_PAL)
+                    apply_filter(t, cplx_in, cplx_out);
+                else
+                    apply_filter_ntsc(t, cplx_in, cplx_out);
 
                 fftwf_execute_dft_c2r(t->inverse, cplx_out, real);
 
@@ -184,10 +307,10 @@ void comp_transform3d_frame(const comp_transform3d_t *t,
                     const int g = tz + z;
                     if (g != fout && g != fout + 1)
                         continue;
-                    float *cb = chroma[g - fout];
+                    float *cb = chroma[(g - fout) ^ parity];
                     for (int y = start_y; y < end_y; y++) {
                         const int fl = tile_y + y;
-                        if ((fl & 1) != (g & 1))
+                        if (((fl + parity) & 1) != (g & 1))
                             continue;
                         float *b = cb + (fl >> 1) * chroma_stride;
                         for (int x = start_x; x < end_x; x++)

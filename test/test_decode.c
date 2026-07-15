@@ -54,7 +54,7 @@ static void test_ntsc_roundtrip(int setup, int rows, int row_off)
     const int w = COMP_ACTIVE_WIDTH_NTSC;
 
     CHECK(comp_encode_init(&enc, COMP_STD_NTSC, setup, 0) == 0, "ntsc encode init");
-    CHECK(comp_decode_init(&dec, COMP_STD_NTSC, 0.4, 1, setup, 2, 0, 0) == 0, "ntsc decode init");
+    CHECK(comp_decode_init(&dec, COMP_STD_NTSC, 0.4, 1, setup, 2, 0, 0, 0) == 0, "ntsc decode init");
 
     for (int r = 0; r < rows; r++) {
         for (int x = 0; x < w; x++) {
@@ -118,7 +118,7 @@ static void test_ntsc_roundtrip(int setup, int rows, int row_off)
  * temporal neighbors, so encode a run of frames and decode the middle */
 static uint16_t rt_comp[8][COMP_ACTIVE_HEIGHT_PAL][COMP_ACTIVE_WIDTH_PAL];
 
-static void test_3d_roundtrip(int standard)
+static void test_3d_roundtrip(int standard, int use_transform)
 {
     const int pal = standard == COMP_STD_PAL;
     const int w = pal ? COMP_ACTIVE_WIDTH_PAL : COMP_ACTIVE_WIDTH_NTSC;
@@ -128,9 +128,9 @@ static void test_3d_roundtrip(int standard)
     comp_decode_t dec;
 
     CHECK(comp_encode_init(&enc, standard, 0, 0) == 0, "3d encode init");
-    CHECK(comp_decode_init(&dec, standard, 0.4, 1, 0, 3, 0, 0) == 0, "3d decode init");
+    CHECK(comp_decode_init(&dec, standard, 0.4, 1, 0, 3, 0, 0, use_transform) == 0, "3d decode init");
     const int look = comp_decode_look(&dec);
-    CHECK(look == (pal ? 3 : 1), "3d look");
+    CHECK(look == ((pal || use_transform) ? 3 : 1), "3d look");
 
     for (int r = 0; r < rows; r++) {
         for (int x = 0; x < w; x++) {
@@ -192,12 +192,14 @@ static void test_3d_roundtrip(int standard)
         }
     }
 
-    printf("test_decode: %s 3d max diff Y %d U %d V %d, edge frames Y %d U %d V %d\n",
-           pal ? "pal" : "ntsc", max_y, max_u, max_v, edge_y, edge_u, edge_v);
+    printf("test_decode: %s 3d tf=%d max diff Y %d U %d V %d, edge frames Y %d U %d V %d\n",
+           pal ? "pal" : "ntsc", use_transform, max_y, max_u, max_v, edge_y, edge_u, edge_v);
     CHECK(max_y <= 64, "3d Y round-trip error %d too large", max_y);
     CHECK(max_u <= 128, "3d U round-trip error %d too large", max_u);
     CHECK(max_v <= 128, "3d V round-trip error %d too large", max_v);
-    CHECK(edge_y <= 512, "3d edge Y error %d too large", edge_y);
+    /* the transform's luma-evidence test degrades more at the black
+     * temporal padding than the comb does */
+    CHECK(edge_y <= (use_transform ? 1024 : 512), "3d edge Y error %d too large", edge_y);
     CHECK(edge_u <= 2048, "3d edge U error %d too large", edge_u);
     CHECK(edge_v <= 2048, "3d edge V error %d too large", edge_v);
 
@@ -214,8 +216,8 @@ static void test_eq(void)
     const int w = COMP_ACTIVE_WIDTH_PAL;
 
     CHECK(comp_encode_init(&enc, COMP_STD_PAL, 0, 0) == 0, "eq encode init");
-    CHECK(comp_decode_init(&dec0, COMP_STD_PAL, 0.4, 1, 0, 2, 0, 0) == 0, "eq=0 init");
-    CHECK(comp_decode_init(&dec1, COMP_STD_PAL, 0.4, 1, 0, 2, 1, 0) == 0, "eq=1 init");
+    CHECK(comp_decode_init(&dec0, COMP_STD_PAL, 0.4, 1, 0, 2, 0, 0, 0) == 0, "eq=0 init");
+    CHECK(comp_decode_init(&dec1, COMP_STD_PAL, 0.4, 1, 0, 2, 1, 0, 0) == 0, "eq=1 init");
 
     /* flat luma, U carries a horizontal frequency sweep */
     for (int r = 0; r < H; r++) {
@@ -282,9 +284,9 @@ static void test_refine(void)
     const int vf = 0;
 
     CHECK(comp_encode_init(&enc, COMP_STD_PAL, 0, 0) == 0, "refine enc init");
-    CHECK(comp_decode_init(&crude, COMP_STD_PAL, 0.4, 1, 0, 1, 0, 0) == 0, "dims=1 init");
-    CHECK(comp_decode_init(&dec0, COMP_STD_PAL, 0.4, 1, 0, 2, 1, 0) == 0, "refine=0 init");
-    CHECK(comp_decode_init(&dec2, COMP_STD_PAL, 0.4, 1, 0, 2, 1, 3) == 0, "refine=3 init");
+    CHECK(comp_decode_init(&crude, COMP_STD_PAL, 0.4, 1, 0, 1, 0, 0, 0) == 0, "dims=1 init");
+    CHECK(comp_decode_init(&dec0, COMP_STD_PAL, 0.4, 1, 0, 2, 1, 0, 0) == 0, "refine=0 init");
+    CHECK(comp_decode_init(&dec2, COMP_STD_PAL, 0.4, 1, 0, 2, 1, 3, 0) == 0, "refine=3 init");
 
     /* luma frequency sweep on gray: the crude notch destroys luma near
      * fsc and turns it into cross-color */
@@ -335,7 +337,7 @@ int main(void)
     comp_decode_t dec;
 
     CHECK(comp_encode_init(&enc, COMP_STD_PAL, 0, 0) == 0, "encode init");
-    CHECK(comp_decode_init(&dec, COMP_STD_PAL, 0.4, 2, 0, 2, 0, 0) == 0, "decode init");
+    CHECK(comp_decode_init(&dec, COMP_STD_PAL, 0.4, 2, 0, 2, 0, 0, 0) == 0, "decode init");
 
     /* top half: color bars; bottom half: smooth chroma gradients */
     for (int r = 0; r < H; r++) {
@@ -402,8 +404,9 @@ int main(void)
     test_ntsc_roundtrip(0, 480, 4);
     test_ntsc_roundtrip(0, 480, 5);
 
-    test_3d_roundtrip(COMP_STD_PAL);
-    test_3d_roundtrip(COMP_STD_NTSC);
+    test_3d_roundtrip(COMP_STD_PAL, 0);
+    test_3d_roundtrip(COMP_STD_NTSC, 0);
+    test_3d_roundtrip(COMP_STD_NTSC, 1);
 
     test_eq();
 

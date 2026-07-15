@@ -32,20 +32,29 @@ typedef struct comp_transform3d_t comp_transform3d_t;
 struct comp_transform3d_t {
     fftwf_plan forward;
     fftwf_plan inverse;
+    int standard;
     float window[COMP_T3D_ZTILE][COMP_T3D_YTILE][COMP_T3D_XTILE];
     float threshold_sq[COMP_T3D_NTHRESH];
 };
 
-int comp_transform3d_init(comp_transform3d_t *t, double threshold);
+/* PAL chroma is symmetric about (fsc, 72 c/aph, 18.75 Hz); the NTSC
+ * variant (after the ld-decode transform-ntsc branch) reflects about
+ * (fsc, 120 c/aph, 15 Hz) with luma-reference evidence and a
+ * frequency-shaped threshold, since NTSC's shared U/V carrier makes
+ * the symmetry only approximate */
+int comp_transform3d_init(comp_transform3d_t *t, double threshold, int standard);
 void comp_transform3d_free(comp_transform3d_t *t);
 
 /* Extract the chroma of the two fields of output frame `frame`.
  * fields[] holds views of the absolute field indices [z0, z0 + nfields);
  * out-of-clip fields must be supplied clamped with parity preserved.
- * chroma0/chroma1 are field buffers (first/second field of the frame). */
+ * parity gives the raster row parity of even (temporally first) fields:
+ * 0 for PAL; NTSC's first field sits on odd rows at row offsets 0/4 and
+ * even rows at offset 5. chroma0/chroma1 are the row-parity field
+ * buffers matching the raster layout. */
 void comp_transform3d_frame(const comp_transform3d_t *t,
                             const comp_field_view_t *fields, int z0, int nfields,
-                            int frame, int width, int field_rows,
+                            int frame, int parity, int width, int field_rows,
                             float *chroma0, float *chroma1, ptrdiff_t chroma_stride);
 
 #endif
