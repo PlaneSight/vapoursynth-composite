@@ -12,6 +12,10 @@
 #define COMP_T2D_XTILE    32
 #define COMP_T2D_YTILE    16
 #define COMP_T2D_XCOMPLEX (COMP_T2D_XTILE / 2 + 1)
+
+/* bins the symmetry filter considers: y 0..YTILE-1 outer, x fsc/2..fsc
+ * inner (the reference's threshold ordering) */
+#define COMP_T2D_NTHRESH (COMP_T2D_YCOMPLEX * (COMP_T2D_XTILE / 4 - COMP_T2D_XTILE / 8 + 1))
 #define COMP_T2D_YCOMPLEX COMP_T2D_YTILE
 
 typedef struct comp_transform2d_t comp_transform2d_t;
@@ -20,7 +24,7 @@ struct comp_transform2d_t {
     fftwf_plan forward;
     fftwf_plan inverse;
     float window[COMP_T2D_YTILE][COMP_T2D_XTILE];
-    float threshold_sq;
+    float threshold_sq[COMP_T2D_NTHRESH];
 };
 
 /* threshold is the bin-symmetry ratio, (0,1]; 0.4 is the reference default */

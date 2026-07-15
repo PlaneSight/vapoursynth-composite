@@ -241,6 +241,23 @@ void comp_decode_free(comp_decode_t *d)
     }
 }
 
+int comp_decode_set_thresholds(comp_decode_t *d, const double *t, int n)
+{
+    if (d->standard != COMP_STD_PAL)
+        return -1;
+    if (d->dimensions == 2 && n == COMP_T2D_NTHRESH) {
+        for (int i = 0; i < n; i++)
+            d->transform.threshold_sq[i] = (float)(t[i] * t[i]);
+        return 0;
+    }
+    if (d->dimensions == 3 && n == COMP_T3D_NTHRESH) {
+        for (int i = 0; i < n; i++)
+            d->transform3.threshold_sq[i] = (float)(t[i] * t[i]);
+        return 0;
+    }
+    return -1;
+}
+
 int comp_decode_look(const comp_decode_t *d)
 {
     if (d->dimensions != 3)

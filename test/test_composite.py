@@ -196,6 +196,23 @@ for pl in range(3):
 rest_n = core.composite.Restore(bff, standard='ntsc', dimensions=3)
 assert (rest_n.width, rest_n.height) == (720, 480)
 rest_n.get_frame(1)
+# ---- per-bin thresholds: uniform list matches the scalar exactly
+tl = core.composite.Decode(enc_t, thresholds=[0.4] * 80)
+ts = core.composite.Decode(enc_t, threshold=0.4)
+for pl in range(3):
+    assert bytes(tl.get_frame(0)[pl]) == bytes(ts.get_frame(0)[pl])
+assert bytes(core.composite.Decode(enc_t, thresholds=[0.9] * 80).get_frame(0)[1]) != \
+       bytes(ts.get_frame(0)[1])
+for bad_kw, needle in ((dict(thresholds=[0.4] * 79), '80'),
+                       (dict(thresholds=[0.4] * 80, dimensions=3), '768'),
+                       (dict(thresholds=[1.5] * 80), '(0, 1]')):
+    try:
+        core.composite.Decode(enc_t, **bad_kw)
+    except vs.Error as e:
+        assert needle in str(e), (needle, str(e))
+    else:
+        assert False, f'expected error: {needle}'
+
 try:
     core.composite.Restore(tex, refine=99)
 except vs.Error as e:

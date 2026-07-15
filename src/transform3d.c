@@ -42,7 +42,8 @@ int comp_transform3d_init(comp_transform3d_t *t, double threshold)
 {
     if (!(threshold > 0.0 && threshold <= 1.0))
         return -1;
-    t->threshold_sq = (float)(threshold * threshold);
+    for (int i = 0; i < COMP_T3D_NTHRESH; i++)
+        t->threshold_sq[i] = (float)(threshold * threshold);
 
     for (int z = 0; z < ZTILE; z++)
         for (int y = 0; y < YTILE; y++)
@@ -81,6 +82,8 @@ void comp_transform3d_free(comp_transform3d_t *t)
 static void apply_filter(const comp_transform3d_t *t,
                          const fftwf_complex *in, fftwf_complex *out)
 {
+    const float *tsq = t->threshold_sq;
+
     memset(out, 0, sizeof(fftwf_complex) * TILE_CPLX);
 
     for (int z = 0; z < ZTILE; z++) {
@@ -94,6 +97,7 @@ static void apply_filter(const comp_transform3d_t *t,
 
             for (int x = XTILE / 8; x <= XTILE / 4; x++) {
                 const int x_ref = (XTILE / 2) - x;
+                const float threshold_sq = *tsq++;
 
                 if (x == x_ref && y == y_ref && z == z_ref) {
                     bo[x][0] = bi[x][0];
@@ -105,8 +109,8 @@ static void apply_filter(const comp_transform3d_t *t,
                 const float m_ref_sq = bi_ref[x_ref][0] * bi_ref[x_ref][0]
                                      + bi_ref[x_ref][1] * bi_ref[x_ref][1];
 
-                if (m_in_sq < m_ref_sq * t->threshold_sq ||
-                    m_ref_sq < m_in_sq * t->threshold_sq)
+                if (m_in_sq < m_ref_sq * threshold_sq ||
+                    m_ref_sq < m_in_sq * threshold_sq)
                     continue;
 
                 bo[x][0] = bi[x][0];

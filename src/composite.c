@@ -331,6 +331,23 @@ static void VS_CC comp_decode_create(const VSMap *in, VSMap *out, void *user_dat
         RETERROR("decoder initialisation failed");
     }
 
+    const int nthresh = vsapi->mapNumElements(in, "thresholds");
+    if (nthresh > 0) {
+        if (d.standard != COMP_STD_PAL)
+            RETERROR("thresholds is Transform PAL only");
+        if (dimensions == 2 && nthresh != COMP_T2D_NTHRESH)
+            RETERROR("dimensions=2 needs 80 thresholds");
+        if (dimensions == 3 && nthresh != COMP_T3D_NTHRESH)
+            RETERROR("dimensions=3 needs 768 thresholds");
+        if (dimensions == 1)
+            RETERROR("thresholds needs dimensions 2 or 3");
+        const double *tv = vsapi->mapGetFloatArray(in, "thresholds", &err);
+        for (int i = 0; i < nthresh; i++)
+            if (!(tv[i] > 0.0 && tv[i] <= 1.0))
+                RETERROR("thresholds must be in (0, 1]");
+        comp_decode_set_thresholds(d.dec, tv, nthresh);
+    }
+
     vsapi->queryVideoFormat(&d.vi.format, cfYUV, stInteger, 16, 0, 0, core);
     d.in_frames = d.vi.numFrames;
 
@@ -503,6 +520,23 @@ static void VS_CC comp_restore_create(const VSMap *in, VSMap *out, void *user_da
         RETERROR("decoder initialisation failed");
     }
 
+    const int nthresh = vsapi->mapNumElements(in, "thresholds");
+    if (nthresh > 0) {
+        if (d.standard != COMP_STD_PAL)
+            RETERROR("thresholds is Transform PAL only");
+        if (dimensions == 2 && nthresh != COMP_T2D_NTHRESH)
+            RETERROR("dimensions=2 needs 80 thresholds");
+        if (dimensions == 3 && nthresh != COMP_T3D_NTHRESH)
+            RETERROR("dimensions=3 needs 768 thresholds");
+        if (dimensions == 1)
+            RETERROR("thresholds needs dimensions 2 or 3");
+        const double *tv = vsapi->mapGetFloatArray(in, "thresholds", &err);
+        for (int i = 0; i < nthresh; i++)
+            if (!(tv[i] > 0.0 && tv[i] <= 1.0))
+                RETERROR("thresholds must be in (0, 1]");
+        comp_decode_set_thresholds(d.dec, tv, nthresh);
+    }
+
     vsapi->queryVideoFormat(&d.vi.format, cfYUV, stInteger, 16, 0, 0, core);
     d.in_frames = d.vi.numFrames;
 
@@ -560,7 +594,8 @@ VS_EXTERNAL_API(void) VapourSynthPluginInit2(VSPlugin *plugin, const VSPLUGINAPI
                              "threshold:float:opt;"
                              "setup:int:opt;"
                              "dimensions:int:opt;"
-                             "eq:int:opt;",
+                             "eq:int:opt;"
+                             "thresholds:float[]:opt;",
                              "clip:vnode;",
                              comp_decode_create, (void *)"Decode", plugin);
     vspapi->registerFunction("Restore",
@@ -571,7 +606,8 @@ VS_EXTERNAL_API(void) VapourSynthPluginInit2(VSPlugin *plugin, const VSPLUGINAPI
                              "setup:int:opt;"
                              "dimensions:int:opt;"
                              "eq:int:opt;"
-                             "refine:int:opt;",
+                             "refine:int:opt;"
+                             "thresholds:float[]:opt;",
                              "clip:vnode;",
                              comp_restore_create, (void *)"Restore", plugin);
 }

@@ -16,6 +16,10 @@
 /* fields the tiles covering one output frame can span, each side of it */
 #define COMP_T3D_LOOK 3
 
+/* bins the symmetry filter considers: z, y outer, x fsc/2..fsc inner */
+#define COMP_T3D_NTHRESH (COMP_T3D_ZTILE * COMP_T3D_YTILE \
+                          * (COMP_T3D_XTILE / 4 - COMP_T3D_XTILE / 8 + 1))
+
 typedef struct comp_field_view_t comp_field_view_t;
 
 struct comp_field_view_t {
@@ -29,7 +33,7 @@ struct comp_transform3d_t {
     fftwf_plan forward;
     fftwf_plan inverse;
     float window[COMP_T3D_ZTILE][COMP_T3D_YTILE][COMP_T3D_XTILE];
-    float threshold_sq;
+    float threshold_sq[COMP_T3D_NTHRESH];
 };
 
 int comp_transform3d_init(comp_transform3d_t *t, double threshold);

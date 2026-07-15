@@ -40,7 +40,8 @@ int comp_transform2d_init(comp_transform2d_t *t, double threshold)
 {
     if (!(threshold > 0.0 && threshold <= 1.0))
         return -1;
-    t->threshold_sq = (float)(threshold * threshold);
+    for (int i = 0; i < COMP_T2D_NTHRESH; i++)
+        t->threshold_sq[i] = (float)(threshold * threshold);
 
     for (int y = 0; y < YTILE; y++)
         for (int x = 0; x < XTILE; x++)
@@ -82,6 +83,8 @@ void comp_transform2d_free(comp_transform2d_t *t)
 static void apply_filter(const comp_transform2d_t *t,
                          const fftwf_complex *in, fftwf_complex *out)
 {
+    const float *tsq = t->threshold_sq;
+
     memset(out, 0, sizeof(fftwf_complex) * YCOMPLEX * XCOMPLEX);
 
     for (int y = 0; y < YTILE; y++) {
@@ -94,6 +97,7 @@ static void apply_filter(const comp_transform2d_t *t,
         /* horizontal frequencies that might be chroma: 0.5fsc to 1.5fsc */
         for (int x = XTILE / 8; x <= XTILE / 4; x++) {
             const int x_ref = (XTILE / 2) - x;
+            const float threshold_sq = *tsq++;
 
             if (x == x_ref && y == y_ref) {
                 /* the bin is its own reflection: it is a carrier */
@@ -106,8 +110,8 @@ static void apply_filter(const comp_transform2d_t *t,
             const float m_ref_sq = bi_ref[x_ref][0] * bi_ref[x_ref][0]
                                  + bi_ref[x_ref][1] * bi_ref[x_ref][1];
 
-            if (m_in_sq < m_ref_sq * t->threshold_sq ||
-                m_ref_sq < m_in_sq * t->threshold_sq)
+            if (m_in_sq < m_ref_sq * threshold_sq ||
+                m_ref_sq < m_in_sq * threshold_sq)
                 continue;  /* asymmetric: probably not chroma */
 
             bo[x][0] = bi[x][0];

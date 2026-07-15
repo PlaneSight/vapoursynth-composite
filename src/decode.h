@@ -67,6 +67,10 @@ int comp_decode_init(comp_decode_t *d, int standard, double threshold,
                      int nscratch, int setup, int dimensions, int eq, int refine);
 void comp_decode_free(comp_decode_t *d);
 
+/* override the Transform PAL per-bin thresholds after init; n must be
+ * COMP_T2D_NTHRESH (dimensions=2) or COMP_T3D_NTHRESH (dimensions=3) */
+int comp_decode_set_thresholds(comp_decode_t *d, const double *t, int n);
+
 /* source frames needed each side of the decoded frame */
 int comp_decode_look(const comp_decode_t *d);
 
