@@ -29,7 +29,17 @@ Alpha. PAL and NTSC round trips work:
   neighbouring frames. `eq` (default 1) applies a chroma equalizer that
   inverts the known encode+decode filter cascade, sharpening recovered
   color; disable it for content that is essentially monochrome, where
-  it can amplify chroma leakage instead.
+  it can amplify chroma leakage instead. `dimensions=1` is a
+  deliberately crude notch decoder, useful as a worst-case reference and
+  as the degradation model of `Restore`.
+- `composite.Restore(clip[, standard, width, threshold, setup, dimensions, eq, refine])`
+  — the whole noise-reduction round trip in one call. `refine` (default
+  1) runs that many analysis-by-synthesis iterations that deconvolve a
+  crude-decoder model against the input picture, recovering luma detail
+  the original decoder attenuated; chroma is untouched by the
+  refinement. Higher values recover more detail on static, detailed
+  content; the effect scales with how closely the footage's original
+  decoder resembled a simple notch.
 
 ## Building
 

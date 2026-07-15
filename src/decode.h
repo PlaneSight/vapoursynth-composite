@@ -5,6 +5,7 @@
 #include <stddef.h>
 #include <stdint.h>
 
+#include "encode.h"
 #include "subcarrier.h"
 #include "transform2d.h"
 #include "transform3d.h"
@@ -19,6 +20,7 @@ struct comp_decode_scratch_t {
     float *chroma_f;    /* one frame, active raster */
     int16_t *chroma;    /* quantised copy for the fixed-point demod */
     float *tmp3;        /* NTSC: 2D chroma; in 3D mode, 1D+2D of three frames */
+    uint16_t *refine;   /* refine loop: YUV estimate, recomposite, scratch */
 };
 
 typedef struct comp_frame_view_t comp_frame_view_t;
@@ -32,7 +34,8 @@ typedef struct comp_decode_t comp_decode_t;
 
 struct comp_decode_t {
     int standard;
-    int dimensions;      /* 2 or 3 */
+    int dimensions;      /* 1 (crude notch), 2, or 3 */
+    int refine;          /* Y-only Landweber iterations, 0 = off */
     int width;
     int height;          /* full raster height: 576 PAL, 486 NTSC */
     int den;
@@ -46,6 +49,7 @@ struct comp_decode_t {
     int32_t cfilt_q16[COMP_DECODE_FILTER_SIZE + 1][4];
     comp_transform2d_t transform;
     comp_transform3d_t transform3;
+    comp_encode_t enc;   /* for refine resynthesis */
 
     /* scratch pool, allocated once at init and reused per frame */
     int nscratch;
@@ -57,9 +61,10 @@ struct comp_decode_t {
 /* nscratch is the maximum number of concurrent frame requests. setup
  * selects the NTSC 7.5 IRE pedestal; threshold is Transform PAL's
  * bin-symmetry ratio; each is ignored by the other standard. eq enables
- * the chroma cascade equalizer. */
+ * the chroma cascade equalizer; refine is the number of Y-only
+ * Landweber refinement iterations against the dimensions=1 model. */
 int comp_decode_init(comp_decode_t *d, int standard, double threshold,
-                     int nscratch, int setup, int dimensions, int eq);
+                     int nscratch, int setup, int dimensions, int eq, int refine);
 void comp_decode_free(comp_decode_t *d);
 
 /* source frames needed each side of the decoded frame */
@@ -72,11 +77,15 @@ int comp_decode_look(const comp_decode_t *d);
  * views[]/view_frames[] hold 2*look+1 composite frames centered on
  * `frame`, clip edges clamped (with the clamped frame numbers); nframes
  * is the clip length, so out-of-clip fields become black as in the
- * reference implementation. */
+ * reference implementation.
+ * orig_y, when non-NULL, is the luma plane of the pre-encode degraded
+ * picture at the raster; d->refine Landweber iterations then deconvolve
+ * the crude-decoder model against it (Y only). */
 void comp_decode_frame(comp_decode_t *d, int frame, int nframes,
                        int rows, int row_off,
                        const comp_frame_view_t *views, const int *view_frames,
                        int look,
+                       const uint16_t *orig_y, ptrdiff_t orig_stride,
                        uint16_t *dsty, ptrdiff_t ystride,
                        uint16_t *dstu, ptrdiff_t ustride,
                        uint16_t *dstv, ptrdiff_t vstride);

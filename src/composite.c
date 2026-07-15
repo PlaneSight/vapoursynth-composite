@@ -21,6 +21,7 @@ typedef struct comp_filter_t comp_filter_t;
 
 struct comp_filter_t {
     VSNode *node;
+    VSNode *orig_node;   /* Restore: the pre-encode picture at the raster */
     VSVideoInfo vi;
     int standard;
     int in_frames;
@@ -98,6 +99,8 @@ static const VSFrame *VS_CC comp_decode_get_frame(int n, int activation_reason, 
                 vsapi->requestFrameFilter(k, f->node, frame_ctx);
             prev = k;
         }
+        if (f->orig_node)
+            vsapi->requestFrameFilter(n, f->orig_node, frame_ctx);
         return NULL;
     }
     if (activation_reason != arAllFramesReady)
@@ -114,14 +117,19 @@ static const VSFrame *VS_CC comp_decode_get_frame(int n, int activation_reason, 
         view_frames[i] = k;
     }
     const VSFrame *src = srcs[look];
+    const VSFrame *orig = f->orig_node ? vsapi->getFrameFilter(n, f->orig_node, frame_ctx) : NULL;
     VSFrame *dst = vsapi->newVideoFrame(&f->vi.format, f->vi.width, f->vi.height, src, core);
 
     comp_decode_frame(f->dec, n, f->in_frames, f->vi.height, comp_row_offset(f, src, vsapi),
                       views, view_frames, look,
+                      orig ? (const uint16_t *)vsapi->getReadPtr(orig, 0) : NULL,
+                      orig ? vsapi->getStride(orig, 0) / 2 : 0,
                       (uint16_t *)vsapi->getWritePtr(dst, 0), vsapi->getStride(dst, 0) / 2,
                       (uint16_t *)vsapi->getWritePtr(dst, 1), vsapi->getStride(dst, 1) / 2,
                       (uint16_t *)vsapi->getWritePtr(dst, 2), vsapi->getStride(dst, 2) / 2);
 
+    if (orig)
+        vsapi->freeFrame(orig);
     for (int i = 0; i <= 2 * look; i++)
         vsapi->freeFrame(srcs[i]);
     return dst;
@@ -135,6 +143,8 @@ static void VS_CC comp_free(void *instance_data, VSCore *core, const VSAPI *vsap
         comp_decode_free(f->dec);
         free(f->dec);
     }
+    if (f->orig_node)
+        vsapi->freeNode(f->orig_node);
     vsapi->freeNode(f->node);
     free(f);
 }
@@ -280,12 +290,14 @@ static void VS_CC comp_decode_create(const VSMap *in, VSMap *out, void *user_dat
     int dimensions = vsapi->mapGetIntSaturated(in, "dimensions", 0, &err);
     if (err)
         dimensions = 2;
-    if (dimensions != 2 && dimensions != 3)
-        RETERROR("dimensions must be 2 or 3");
+    if (dimensions < 1 || dimensions > 3)
+        RETERROR("dimensions must be 1, 2 or 3");
 
     int eq = vsapi->mapGetIntSaturated(in, "eq", 0, &err);
     if (err)
         eq = 1;
+
+
 
     if (!vsh_isConstantVideoFormat(&d.vi))
         RETERROR("clip must have constant format and dimensions");
@@ -312,7 +324,8 @@ static void VS_CC comp_decode_create(const VSMap *in, VSMap *out, void *user_dat
     if (!d.dec)
         RETERROR("out of memory");
     if (comp_decode_init(d.dec, d.standard, threshold,
-                         info.numThreads < 1 ? 1 : info.numThreads, setup, dimensions, eq)) {
+                         info.numThreads < 1 ? 1 : info.numThreads, setup,
+                         dimensions, eq, 0)) {
         free(d.dec);
         d.dec = NULL;
         RETERROR("decoder initialisation failed");
@@ -362,6 +375,173 @@ static void VS_CC comp_decode_create(const VSMap *in, VSMap *out, void *user_dat
     vsapi->mapConsumeNode(out, "clip", res_node, maReplace);
 }
 
+
+/* Restore(): the whole noise-reduction round trip in one filter, with
+ * optional Y-only Landweber refinement anchored to the input picture
+ * (which Decode alone cannot see). */
+static void VS_CC comp_restore_create(const VSMap *in, VSMap *out, void *user_data, VSCore *core, const VSAPI *vsapi)
+{
+    const char *name = user_data;
+    comp_filter_t d = {0};
+    int err;
+
+    d.node = vsapi->mapGetNode(in, "clip", 0, NULL);
+    d.vi = *vsapi->getVideoInfo(d.node);
+    const int src_width = d.vi.width;
+
+    if (comp_parse_standard(in, vsapi, &d.standard))
+        RETERROR("standard must be pal or ntsc");
+    const int setup = !!vsapi->mapGetIntSaturated(in, "setup", 0, &err);
+
+    int width = vsapi->mapGetIntSaturated(in, "width", 0, &err);
+    if (err)
+        width = src_width;
+    if (width < 16 || width > 8192)
+        RETERROR("width must be between 16 and 8192");
+
+    double threshold = vsapi->mapGetFloat(in, "threshold", 0, &err);
+    if (err)
+        threshold = 0.4;
+    if (!(threshold > 0.0 && threshold <= 1.0))
+        RETERROR("threshold must be in (0, 1]");
+
+    int dimensions = vsapi->mapGetIntSaturated(in, "dimensions", 0, &err);
+    if (err)
+        dimensions = 2;
+    if (dimensions < 1 || dimensions > 3)
+        RETERROR("dimensions must be 1, 2 or 3");
+
+    int eq = vsapi->mapGetIntSaturated(in, "eq", 0, &err);
+    if (err)
+        eq = 1;
+
+    int refine = vsapi->mapGetIntSaturated(in, "refine", 0, &err);
+    if (err)
+        refine = 1;
+    if (refine < 0 || refine > 16)
+        RETERROR("refine must be between 0 and 16");
+
+    if (!vsh_isConstantVideoFormat(&d.vi))
+        RETERROR("clip must have constant format and dimensions");
+    if (d.vi.format.colorFamily != cfYUV)
+        RETERROR("clip must be YUV");
+    if (d.standard == COMP_STD_PAL) {
+        if (d.vi.height != COMP_ACTIVE_HEIGHT_PAL)
+            RETERROR("pal input must have 576 lines");
+    } else {
+        if (d.vi.height != 480 && d.vi.height != COMP_ACTIVE_HEIGHT_NTSC)
+            RETERROR("ntsc input must have 480 or 486 lines");
+    }
+
+    VSPlugin *resize = vsapi->getPluginByID("com.vapoursynth.resize", core);
+    if (!resize)
+        RETERROR("resize plugin not found");
+
+    /* stage 1: the picture on the 4xfsc raster (also the refine anchor) */
+    const int pal = d.standard == COMP_STD_PAL;
+    const int rwidth = comp_encode_width(d.standard);
+    const double rho = pal ? RHO_PAL : RHO_NTSC;
+    const double active0 = pal ? 182.0 : 130.0 + 57.0 / 90.0;
+    const double anchor601 = pal ? 132.0 : 122.0;
+    const double scale = src_width / 720.0;
+
+    VSMap *args = vsapi->createMap();
+    vsapi->mapConsumeNode(args, "clip", d.node, maReplace);
+    d.node = NULL;
+    vsapi->mapSetInt(args, "format", pfYUV444P16, maReplace);
+    vsapi->mapSetInt(args, "width", rwidth, maReplace);
+    vsapi->mapSetInt(args, "height", d.vi.height, maReplace);
+    vsapi->mapSetFloat(args, "src_left",
+                       scale * ((active0 - 0.5) * rho - anchor601) + 0.5, maReplace);
+    vsapi->mapSetFloat(args, "src_width", scale * (rwidth * rho), maReplace);
+    VSMap *ret = vsapi->invoke(resize, "Spline36", args);
+    vsapi->freeMap(args);
+
+    const char *invoke_err = vsapi->mapGetError(ret);
+    if (invoke_err) {
+        char msg[256];
+        snprintf(msg, sizeof(msg), "%s: %s", name, invoke_err);
+        vsapi->mapSetError(out, msg);
+        vsapi->freeMap(ret);
+        return;
+    }
+    VSNode *raster = vsapi->mapGetNode(ret, "clip", 0, NULL);
+    vsapi->freeMap(ret);
+
+    /* stage 2: modulator over the raster picture */
+    comp_filter_t *edata = malloc(sizeof(*edata));
+    memset(edata, 0, sizeof(*edata));
+    edata->node = raster;
+    edata->vi = *vsapi->getVideoInfo(raster);
+    edata->standard = d.standard;
+    comp_encode_init(&edata->enc, d.standard, setup);
+    vsapi->queryVideoFormat(&edata->vi.format, cfGray, stInteger, 16, 0, 0, core);
+
+    VSFilterDependency edeps[] = {{ raster, rpStrictSpatial }};
+    VSNode *modulated = vsapi->createVideoFilter2(name, &edata->vi, comp_encode_get_frame, comp_free,
+                                                  fmParallel, edeps, 1, edata, core);
+    if (!modulated) {
+        vsapi->mapSetError(out, "Restore: failed to create modulator");
+        return;
+    }
+
+    /* stage 3: decoder with the raster picture as the refine anchor */
+    d.node = modulated;
+    d.orig_node = vsapi->addNodeRef(raster);
+    d.vi = *vsapi->getVideoInfo(modulated);
+
+    VSCoreInfo info;
+    vsapi->getCoreInfo(core, &info);
+    d.dec = malloc(sizeof(*d.dec));
+    if (!d.dec)
+        RETERROR("out of memory");
+    if (comp_decode_init(d.dec, d.standard, threshold,
+                         info.numThreads < 1 ? 1 : info.numThreads, setup,
+                         dimensions, eq, refine)) {
+        free(d.dec);
+        d.dec = NULL;
+        RETERROR("decoder initialisation failed");
+    }
+
+    vsapi->queryVideoFormat(&d.vi.format, cfYUV, stInteger, 16, 0, 0, core);
+    d.in_frames = d.vi.numFrames;
+
+    comp_filter_t *data = malloc(sizeof(*data));
+    *data = d;
+
+    VSFilterDependency ddeps[] = {{ data->node, dimensions == 3 ? rpGeneral : rpStrictSpatial },
+                                  { data->orig_node, rpStrictSpatial }};
+    VSNode *dec_node = vsapi->createVideoFilter2(name, &data->vi, comp_decode_get_frame, comp_free,
+                                                 fmParallel, ddeps, 2, data, core);
+    if (!dec_node) {
+        vsapi->mapSetError(out, "Restore: failed to create filter");
+        return;
+    }
+
+    /* stage 4: back to the caller's raster */
+    args = vsapi->createMap();
+    vsapi->mapConsumeNode(args, "clip", dec_node, maReplace);
+    vsapi->mapSetInt(args, "width", width, maReplace);
+    vsapi->mapSetInt(args, "height", d.vi.height, maReplace);
+    vsapi->mapSetFloat(args, "src_left",
+                       anchor601 / rho - (active0 - 0.5) - 0.5 * (720.0 / width) / rho, maReplace);
+    vsapi->mapSetFloat(args, "src_width", 720.0 / rho, maReplace);
+    ret = vsapi->invoke(resize, "Spline36", args);
+    vsapi->freeMap(args);
+
+    invoke_err = vsapi->mapGetError(ret);
+    if (invoke_err) {
+        char msg[256];
+        snprintf(msg, sizeof(msg), "%s: %s", name, invoke_err);
+        vsapi->mapSetError(out, msg);
+        vsapi->freeMap(ret);
+        return;
+    }
+    VSNode *res_node = vsapi->mapGetNode(ret, "clip", 0, NULL);
+    vsapi->freeMap(ret);
+    vsapi->mapConsumeNode(out, "clip", res_node, maReplace);
+}
+
 VS_EXTERNAL_API(void) VapourSynthPluginInit2(VSPlugin *plugin, const VSPLUGINAPI *vspapi)
 {
     vspapi->configPlugin("com.ifb.composite", "composite",
@@ -383,4 +563,15 @@ VS_EXTERNAL_API(void) VapourSynthPluginInit2(VSPlugin *plugin, const VSPLUGINAPI
                              "eq:int:opt;",
                              "clip:vnode;",
                              comp_decode_create, (void *)"Decode", plugin);
+    vspapi->registerFunction("Restore",
+                             "clip:vnode;"
+                             "standard:data:opt;"
+                             "width:int:opt;"
+                             "threshold:float:opt;"
+                             "setup:int:opt;"
+                             "dimensions:int:opt;"
+                             "eq:int:opt;"
+                             "refine:int:opt;",
+                             "clip:vnode;",
+                             comp_restore_create, (void *)"Restore", plugin);
 }

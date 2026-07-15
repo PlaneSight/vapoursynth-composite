@@ -92,18 +92,20 @@ static void design_eq(comp_decode_t *d, const int16_t *enc_taps, int enc_n,
 }
 
 int comp_decode_init(comp_decode_t *d, int standard, double threshold,
-                     int nscratch, int setup, int dimensions, int eq)
+                     int nscratch, int setup, int dimensions, int eq, int refine)
 {
-    comp_encode_t enc;
-
-    if (nscratch < 1 || (dimensions != 2 && dimensions != 3))
+    if (nscratch < 1 || dimensions < 1 || dimensions > 3 || refine < 0)
         return -1;
 
     memset(d, 0, sizeof(*d));
 
-    /* levels and chroma scales must match the encoder exactly */
+    /* levels and chroma scales must match the encoder exactly; the
+     * encoder is also the resynthesis step of the refine loop */
+    comp_encode_t enc;
     if (comp_encode_init(&enc, standard, setup))
         return -1;
+    d->enc = enc;
+    d->refine = refine;
     d->standard = standard;
     d->dimensions = dimensions;
     d->eq = !!eq;
@@ -118,7 +120,7 @@ int comp_decode_init(comp_decode_t *d, int standard, double threshold,
     d->luma_den = enc.luma_num;
     memcpy(d->sin_q15, enc.sin_q15, sizeof(d->sin_q15));
 
-    if (standard == COMP_STD_PAL) {
+    if (standard == COMP_STD_PAL && dimensions > 1) {
         /* PALcolour's 2D chroma filter: raised-cosine, ~1.18 MHz,
          * horizontal taps 0..FS mirrored, vertical taps at 0/±2/±1/±3
          * field lines (in that array order). Double at init, Q16 use. */
@@ -162,6 +164,14 @@ int comp_decode_init(comp_decode_t *d, int standard, double threshold,
         if (dimensions == 2 ? comp_transform2d_init(&d->transform, threshold)
                             : comp_transform3d_init(&d->transform3, threshold))
             return -1;
+    } else if (standard == COMP_STD_PAL) {
+        /* dimensions=1 uses the crude path only */
+        if (eq) {
+            double prof[COLORLP_TAPS];
+            for (int k = 0; k < COLORLP_TAPS; k++)
+                prof[k] = colorlp_q15[k] / 32768.0;
+            design_eq(d, enc.uv_taps, enc.uv_ntaps, prof, COLORLP_TAPS);
+        }
     } else {
         /* the comb's adaptivity range: 45 IRE of the encoded span */
         d->comb_krange = (int32_t)lrint(45.0 * (0xC800 - d->level_black) / 100.0);
@@ -187,10 +197,18 @@ int comp_decode_init(comp_decode_t *d, int standard, double threshold,
             comp_decode_free(d);
             return -1;
         }
-        if (standard == COMP_STD_NTSC) {
+        if (standard == COMP_STD_NTSC && dimensions > 1) {
             d->scratch[i].tmp3 = malloc(sizeof(float) * d->width * d->height
                                         * (dimensions == 3 ? 6 : 1));
             if (!d->scratch[i].tmp3) {
+                comp_decode_free(d);
+                return -1;
+            }
+        }
+        if (refine > 0) {
+            /* YUV estimate (3 planes), recomposite, crude Y, spare */
+            d->scratch[i].refine = malloc(sizeof(uint16_t) * d->width * d->height * 6);
+            if (!d->scratch[i].refine) {
                 comp_decode_free(d);
                 return -1;
             }
@@ -208,6 +226,7 @@ void comp_decode_free(comp_decode_t *d)
             free(d->scratch[i].chroma_f);
             free(d->scratch[i].chroma);
             free(d->scratch[i].tmp3);
+            free(d->scratch[i].refine);
         }
         free(d->scratch);
         d->scratch = NULL;
@@ -217,14 +236,14 @@ void comp_decode_free(comp_decode_t *d)
     if (d->standard == COMP_STD_PAL) {
         if (d->dimensions == 2)
             comp_transform2d_free(&d->transform);
-        else
+        else if (d->dimensions == 3)
             comp_transform3d_free(&d->transform3);
     }
 }
 
 int comp_decode_look(const comp_decode_t *d)
 {
-    if (d->dimensions == 2)
+    if (d->dimensions != 3)
         return 0;
     return d->standard == COMP_STD_PAL ? COMP_T3D_LOOK : 1;
 }
@@ -641,10 +660,126 @@ static void ntsc_demod_line(const comp_decode_t *d, int frame, int raster_row,
     }
 }
 
+
+/* Crude 1D notch decode (a classic cheap decoder, and the degradation
+ * model of the refine loop): bandpass chroma estimate, product demod
+ * with the color low-pass, luma = composite minus the estimate. */
+static void crude_decode_frame(const comp_decode_t *d, int frame, int rows,
+                               int row_off, int use_eq,
+                               const uint16_t *comp, ptrdiff_t comp_stride,
+                               uint16_t *dsty, ptrdiff_t ystride,
+                               uint16_t *dstu, ptrdiff_t ustride,
+                               uint16_t *dstv, ptrdiff_t vstride)
+{
+    const int w = d->width;
+    const int half = COLORLP_TAPS / 2;
+
+    for (int r = 0; r < rows; r++) {
+        const uint16_t *line = comp + r * comp_stride;
+        int32_t est[COMP_ACTIVE_WIDTH_PAL];
+        int32_t m[COMP_ACTIVE_WIDTH_PAL + COLORLP_TAPS];
+        int32_t n[COMP_ACTIVE_WIDTH_PAL + COLORLP_TAPS];
+        int32_t u_row[COMP_ACTIVE_WIDTH_PAL], v_row[COMP_ACTIVE_WIDTH_PAL];
+        int32_t u_eq[COMP_ACTIVE_WIDTH_PAL], v_eq[COMP_ACTIVE_WIDTH_PAL];
+
+        est[0] = est[1] = est[w - 2] = est[w - 1] = 0;
+        for (int x = 2; x < w - 2; x++)
+            est[x] = (2 * (int32_t)line[x] - line[x - 2] - line[x + 2]) / 4;
+
+        memset(m, 0, sizeof(int32_t) * half);
+        memset(n, 0, sizeof(int32_t) * half);
+        memset(&m[half + w], 0, sizeof(int32_t) * half);
+        memset(&n[half + w], 0, sizeof(int32_t) * half);
+        for (int x = 0; x < w; x++) {
+            const int32_t sn = (x & 3) == 1 ? 1 : (x & 3) == 3 ? -1 : 0;
+            const int32_t cs = (x & 3) == 0 ? 1 : (x & 3) == 2 ? -1 : 0;
+            m[half + x] = est[x] * sn;
+            n[half + x] = est[x] * cs;
+        }
+
+        const comp_sc_line_t sc = comp_sc_line(d->standard, frame, r + row_off);
+        const int32_t sn0 = d->sin_q15[sc.phase];
+        const int32_t cs0 = d->sin_q15[(sc.phase + d->den / 4) % d->den];
+
+        for (int x = 0; x < w; x++) {
+            int64_t p = 0, q = 0;
+            for (int j = 0; j < COLORLP_TAPS; j++) {
+                p += (int64_t)colorlp_q15[j] * m[x + j];
+                q += (int64_t)colorlp_q15[j] * n[x + j];
+            }
+            const int32_t p0 = (int32_t)((p + 16384) >> 15);
+            const int32_t q0 = (int32_t)((q + 16384) >> 15);
+            u_row[x] = (int32_t)(((int64_t)p0 * cs0 + (int64_t)q0 * sn0 + 8192) >> 14);
+            v_row[x] = sc.vswitch *
+                (int32_t)(((int64_t)q0 * cs0 - (int64_t)p0 * sn0 + 8192) >> 14);
+
+            const int32_t yl = (int32_t)line[x] - est[x];
+            dsty[r * ystride + x] =
+                clamp_u16(4096 + rdiv((int64_t)(yl - d->level_black) * d->luma_num, d->luma_den));
+        }
+
+        const int32_t *u_out = u_row, *v_out = v_row;
+        if (use_eq && d->eq) {
+            eq_row(d, u_row, u_eq, w);
+            eq_row(d, v_row, v_eq, w);
+            u_out = u_eq;
+            v_out = v_eq;
+        }
+        for (int x = 0; x < w; x++) {
+            dstu[r * ustride + x] = clamp_u16(32768 + rdiv((int64_t)u_out[x] * 32768, d->ku));
+            dstv[r * vstride + x] = clamp_u16(32768 + rdiv((int64_t)v_out[x] * 32768, d->kv));
+        }
+    }
+}
+
+/* Y-only Landweber refinement, anchored to the pre-encode original:
+ * iterate the luma estimate so the crude decode of its recomposite
+ * converges to the original degraded luma, i.e. deconvolve the crude
+ * decoder model. Chroma stays fixed. */
+static void refine_luma(const comp_decode_t *d, comp_decode_scratch_t *s,
+                        int frame, int rows, int row_off,
+                        const uint16_t *orig_y, ptrdiff_t orig_stride,
+                        uint16_t *dsty, ptrdiff_t ystride,
+                        uint16_t *dstu, ptrdiff_t ustride,
+                        uint16_t *dstv, ptrdiff_t vstride)
+{
+    const int w = d->width;
+    const size_t plane = (size_t)w * d->height;
+    uint16_t *est = s->refine;                   /* current YUV estimate */
+    uint16_t *comp2 = s->refine + 3 * plane;     /* recomposite */
+    uint16_t *cru = s->refine + 4 * plane;       /* crude Y of recomposite */
+
+    for (int r = 0; r < rows; r++) {
+        memcpy(est + r * w, dsty + r * ystride, sizeof(uint16_t) * w);
+        memcpy(est + plane + r * w, dstu + r * ustride, sizeof(uint16_t) * w);
+        memcpy(est + 2 * plane + r * w, dstv + r * vstride, sizeof(uint16_t) * w);
+    }
+
+    for (int it = 0; it < d->refine; it++) {
+        for (int r = 0; r < rows; r++)
+            comp_encode_line(&d->enc, comp2 + r * w,
+                             est + r * w, est + plane + r * w, est + 2 * plane + r * w,
+                             comp_sc_line(d->standard, frame, r + row_off));
+        crude_decode_frame(d, frame, rows, row_off, 0, comp2, w,
+                           cru, w, cru + plane, w, cru + plane, w);
+        for (int r = 0; r < rows; r++) {
+            const uint16_t *oy = orig_y + r * orig_stride;
+            uint16_t *ey = est + r * w;
+            const uint16_t *cy = cru + r * w;
+            for (int x = 0; x < w; x++)
+                ey[x] = clamp_u16((int32_t)ey[x] + (int32_t)oy[x] - (int32_t)cy[x]);
+        }
+    }
+
+    for (int r = 0; r < rows; r++)
+        memcpy(dsty + r * ystride, est + r * w, sizeof(uint16_t) * w);
+}
+
 void comp_decode_frame(comp_decode_t *d, int frame, int nframes,
                        int rows, int row_off,
                        const comp_frame_view_t *views, const int *view_frames,
                        int look,
+                       const uint16_t *orig_y, ptrdiff_t orig_stride,
                        uint16_t *dsty, ptrdiff_t ystride,
                        uint16_t *dstu, ptrdiff_t ustride,
                        uint16_t *dstv, ptrdiff_t vstride)
@@ -654,7 +789,10 @@ void comp_decode_frame(comp_decode_t *d, int frame, int nframes,
     const uint16_t *comp = views[look].data;
     const ptrdiff_t comp_stride = views[look].stride;
 
-    if (d->standard == COMP_STD_PAL) {
+    if (d->dimensions == 1) {
+        crude_decode_frame(d, frame, rows, row_off, 1, comp, comp_stride,
+                           dsty, ystride, dstu, ustride, dstv, vstride);
+    } else if (d->standard == COMP_STD_PAL) {
         const int frows = rows / 2;
 
         if (d->dimensions == 2) {
@@ -731,6 +869,10 @@ void comp_decode_frame(comp_decode_t *d, int frame, int nframes,
                             dsty + r * ystride, dstu + r * ustride,
                             dstv + r * vstride);
     }
+
+    if (d->refine > 0 && orig_y)
+        refine_luma(d, s, frame, rows, row_off, orig_y, orig_stride,
+                    dsty, ystride, dstu, ustride, dstv, vstride);
 
     scratch_release(d, s);
 }

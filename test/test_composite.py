@@ -178,4 +178,29 @@ except vs.Error as e:
 else:
     assert False, 'dimensions=4 accepted'
 
+# ---- dimensions=1 (crude) decode and Restore() end to end
+crude = core.composite.Decode(enc_t, dimensions=1)
+assert (crude.width, crude.height, crude.format.id) == (720, 576, vs.YUV444P16)
+
+rest = core.composite.Restore(tex)
+assert (rest.width, rest.height, rest.format.id) == (720, 576, vs.YUV444P16)
+# refine only touches luma: chroma must match the plain round trip
+plain = core.composite.Decode(core.composite.Encode(tex))
+assert bytes(rest.get_frame(0)[1]) == bytes(plain.get_frame(0)[1])
+assert bytes(rest.get_frame(0)[0]) != bytes(plain.get_frame(0)[0])
+# refine=0 Restore is exactly the plain round trip
+rest0 = core.composite.Restore(tex, refine=0)
+for pl in range(3):
+    assert bytes(rest0.get_frame(0)[pl]) == bytes(plain.get_frame(0)[pl])
+# NTSC Restore with field-order detection
+rest_n = core.composite.Restore(bff, standard='ntsc', dimensions=3)
+assert (rest_n.width, rest_n.height) == (720, 480)
+rest_n.get_frame(1)
+try:
+    core.composite.Restore(tex, refine=99)
+except vs.Error as e:
+    assert 'refine' in str(e)
+else:
+    assert False, 'refine=99 accepted'
+
 print('test_composite: all tests passed')
