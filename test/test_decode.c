@@ -46,7 +46,7 @@ int main(void)
     comp_encode_t enc;
     comp_decode_t dec;
 
-    CHECK(comp_encode_init(&enc, COMP_STD_PAL) == 0, "encode init");
+    CHECK(comp_encode_init(&enc, COMP_STD_PAL, 0) == 0, "encode init");
     CHECK(comp_decode_init(&dec, COMP_STD_PAL, 0.4, 2) == 0, "decode init");
     CHECK(comp_decode_init(&dec, COMP_STD_NTSC, 0.4, 2) != 0, "ntsc must be rejected");
     CHECK(comp_decode_init(&dec, COMP_STD_PAL, 0.4, 2) == 0, "decode re-init");

@@ -9,8 +9,10 @@ enum {
 };
 
 /* active-picture raster at 4xfsc */
-#define COMP_ACTIVE_WIDTH_PAL  928
-#define COMP_ACTIVE_HEIGHT_PAL 576
+#define COMP_ACTIVE_WIDTH_PAL   928
+#define COMP_ACTIVE_HEIGHT_PAL  576
+#define COMP_ACTIVE_WIDTH_NTSC  758
+#define COMP_ACTIVE_HEIGHT_NTSC 486
 
 /* At 4xfsc the subcarrier advances exactly 1/4 cycle per sample, so a
  * line's phase is fully described by its start phase, which is an exact

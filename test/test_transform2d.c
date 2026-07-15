@@ -125,7 +125,7 @@ int main(void)
 
     /* realistic input: an encoded field of color, plus noise */
     comp_encode_t enc;
-    comp_encode_init(&enc, COMP_STD_PAL);
+    comp_encode_init(&enc, COMP_STD_PAL, 0);
     for (int fr = 0; fr < ROWS; fr++) {
         uint16_t y[W], u[W], v[W];
         for (int x = 0; x < W; x++) {

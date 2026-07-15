@@ -176,7 +176,7 @@ static void VS_CC comp_encode_create(const VSMap *in, VSMap *out, void *user_dat
     d.node = vsapi->mapGetNode(ret, "clip", 0, NULL);
     vsapi->freeMap(ret);
 
-    comp_encode_init(&d.enc, d.standard);
+    comp_encode_init(&d.enc, d.standard, 0);
     vsapi->queryVideoFormat(&d.vi.format, cfGray, stInteger, 16, 0, 0, core);
     d.vi.width = COMP_ACTIVE_WIDTH_PAL;
     d.vi.height = COMP_ACTIVE_HEIGHT_PAL;
