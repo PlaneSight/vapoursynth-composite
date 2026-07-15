@@ -13,15 +13,20 @@ incdir = include_directories(
 )
 
 m_dep = meson.get_compiler('c').find_library('m', required: false)
+fftw3f_dep = dependency('fftw3f')
+threads_dep = dependency('threads')
+core_deps = [m_dep, fftw3f_dep, threads_dep]
 
-core = static_library('composite_core', files('src/subcarrier.c', 'src/encode.c'),
+core = static_library('composite_core',
+    files('src/subcarrier.c', 'src/encode.c', 'src/transform2d.c'),
+    dependencies: core_deps,
     gnu_symbol_visibility: 'hidden',
     pic: true,
 )
 
 shared_module('composite',
     files('src/composite.c'),
-    dependencies: m_dep,
+    dependencies: core_deps,
     gnu_symbol_visibility: 'hidden',
     include_directories: incdir,
     install: true,
@@ -32,14 +37,21 @@ shared_module('composite',
 
 test('subcarrier', executable('test_subcarrier',
     files('test/test_subcarrier.c'),
-    dependencies: m_dep,
+    dependencies: core_deps,
     include_directories: include_directories('src'),
     link_with: core,
 ))
 
 test('encode', executable('test_encode',
     files('test/test_encode.c'),
-    dependencies: m_dep,
+    dependencies: core_deps,
+    include_directories: include_directories('src'),
+    link_with: core,
+))
+
+test('transform2d', executable('test_transform2d',
+    files('test/test_transform2d.c'),
+    dependencies: core_deps + dependency('fftw3'),
     include_directories: include_directories('src'),
     link_with: core,
 ))
