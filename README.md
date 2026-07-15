@@ -12,16 +12,19 @@ BBC RD 1986/2.
 
 ## Status
 
-Alpha. The PAL round trip works:
+Alpha. PAL and NTSC round trips work:
 
-- `composite.Encode(clip[, standard])` — YCbCr (any constant YUV format,
-  576 lines) to composite GRAY16 at the 4×fsc active raster (928×576),
-  levels per EBU Tech 3280 (black 0x4000, white 0xD300).
-- `composite.Decode(clip[, standard, width, threshold])` — composite back
-  to YUV444P16 via 2D Transform PAL chroma separation and PALcolour-style
-  demodulation, resampled to `width` (default 720).
-
-NTSC is not implemented yet.
+- `composite.Encode(clip[, standard, setup])` — YCbCr (any constant YUV
+  format) to composite GRAY16 at the 4×fsc active raster: PAL 928×576
+  (levels per EBU Tech 3280), NTSC 758×480/486 (levels per SMPTE 244M;
+  `setup` adds the 7.5 IRE pedestal). A 480-line NTSC clip occupies the
+  486-line BFF raster per its `_FieldBased` frame prop: BFF/DV at rows
+  4..483, TFF/RP 202 at rows 5..484.
+- `composite.Decode(clip[, standard, width, threshold, setup])` —
+  composite back to YUV444P16, resampled to `width` (default 720). PAL
+  uses 2D Transform PAL chroma separation with PALcolour-style
+  demodulation (`threshold` is the transform's bin-symmetry ratio);
+  NTSC uses a 2D adaptive line comb.
 
 ## Building
 
