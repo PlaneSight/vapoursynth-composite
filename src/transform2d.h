@@ -23,12 +23,15 @@ typedef struct comp_transform2d_t comp_transform2d_t;
 struct comp_transform2d_t {
     fftwf_plan forward;
     fftwf_plan inverse;
+    int level;
     float window[COMP_T2D_YTILE][COMP_T2D_XTILE];
     float threshold_sq[COMP_T2D_NTHRESH];
 };
 
-/* threshold is the bin-symmetry ratio, (0,1]; 0.4 is the reference default */
-int comp_transform2d_init(comp_transform2d_t *t, double threshold);
+/* threshold is the bin-symmetry ratio, (0,1]; 0.4 is the reference
+ * default. level selects amplitude limiting instead: each bin pair has
+ * the larger magnitude set to the smaller (threshold then unused). */
+int comp_transform2d_init(comp_transform2d_t *t, double threshold, int level);
 void comp_transform2d_free(comp_transform2d_t *t);
 
 /* Extract the chroma component of one field of active-picture composite.

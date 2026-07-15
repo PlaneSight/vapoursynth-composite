@@ -39,11 +39,13 @@ static double compute_window(int element, int limit)
     return 0.5 - 0.5 * cos((2.0 * M_PI * (element + 0.5)) / limit);
 }
 
-int comp_transform3d_init(comp_transform3d_t *t, double threshold, int standard)
+int comp_transform3d_init(comp_transform3d_t *t, double threshold, int standard,
+                          int level)
 {
     if (!(threshold > 0.0 && threshold <= 1.0))
         return -1;
     t->standard = standard;
+    t->level = !!level;
     for (int i = 0; i < COMP_T3D_NTHRESH; i++)
         t->threshold_sq[i] = (float)(threshold * threshold);
 
@@ -110,6 +112,21 @@ static void apply_filter(const comp_transform3d_t *t,
                 const float m_in_sq = bi[x][0] * bi[x][0] + bi[x][1] * bi[x][1];
                 const float m_ref_sq = bi_ref[x_ref][0] * bi_ref[x_ref][0]
                                      + bi_ref[x_ref][1] * bi_ref[x_ref][1];
+
+                if (t->level) {
+                    /* set the larger of the pair to the smaller, phase
+                     * preserved (GB 2365247 A) */
+                    float f_in = 1.0f, f_ref = 1.0f;
+                    if (m_in_sq > m_ref_sq)
+                        f_in = sqrtf(m_ref_sq / m_in_sq);
+                    else if (m_ref_sq > m_in_sq)
+                        f_ref = sqrtf(m_in_sq / m_ref_sq);
+                    bo[x][0] = bi[x][0] * f_in;
+                    bo[x][1] = bi[x][1] * f_in;
+                    bo_ref[x_ref][0] = bi_ref[x_ref][0] * f_ref;
+                    bo_ref[x_ref][1] = bi_ref[x_ref][1] * f_ref;
+                    continue;
+                }
 
                 if (m_in_sq < m_ref_sq * threshold_sq ||
                     m_ref_sq < m_in_sq * threshold_sq)
@@ -214,11 +231,6 @@ static void apply_filter_ntsc(const comp_transform3d_t *t,
                     }
                 }
 
-                /* threshold shaped by proximity to chroma vs luma */
-                const float k_luma = dist_sq3(kz - 0.5f, ky - 0.5f, kx);
-                const float k_chroma = dist_sq3(kz - 0.25f, ky - 0.25f, kx - 0.25f);
-                float th_sq = powf(k_chroma / (k_luma + k_chroma), 10.0f * t0_sq);
-
                 const float m_in = bi[x][0] * bi[x][0] + bi[x][1] * bi[x][1];
                 const float m_ref = bi_ref[x_ref][0] * bi_ref[x_ref][0]
                                   + bi_ref[x_ref][1] * bi_ref[x_ref][1];
@@ -226,6 +238,30 @@ static void apply_filter_ntsc(const comp_transform3d_t *t,
                 const float l2 = (*lr2)[0] * (*lr2)[0] + (*lr2)[1] * (*lr2)[1];
                 const float m_luma = l1 > l2 ? l1 : l2;
                 const float m_max = m_in > m_ref ? m_in : m_ref;
+
+                if (t->level) {
+                    /* the reference's levelMode: discard the pair when
+                     * it lacks luma evidence, pass it untouched inside
+                     * a 10x squared-magnitude dead zone, and beyond
+                     * that scale the larger down to the smaller */
+                    if (m_max > 10.0f * m_luma)
+                        continue;
+                    float f_in = 1.0f, f_ref = 1.0f;
+                    if (m_in > 10.0f * m_ref)
+                        f_in = sqrtf(m_ref / m_in);
+                    else if (m_ref > 10.0f * m_in)
+                        f_ref = sqrtf(m_in / m_ref);
+                    bo[x][0] = bi[x][0] * f_in;
+                    bo[x][1] = bi[x][1] * f_in;
+                    bo_ref[x_ref][0] = bi_ref[x_ref][0] * f_ref;
+                    bo_ref[x_ref][1] = bi_ref[x_ref][1] * f_ref;
+                    continue;
+                }
+
+                /* threshold shaped by proximity to chroma vs luma */
+                const float k_luma = dist_sq3(kz - 0.5f, ky - 0.5f, kx);
+                const float k_chroma = dist_sq3(kz - 0.25f, ky - 0.25f, kx - 0.25f);
+                float th_sq = powf(k_chroma / (k_luma + k_chroma), 10.0f * t0_sq);
 
                 if (m_luma < m_max * th_sq)
                     th_sq = 0.5f * (1.0f + th_sq);

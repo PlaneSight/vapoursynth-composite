@@ -36,10 +36,11 @@ static double compute_window(int element, int limit)
     return 0.5 - 0.5 * cos((2.0 * M_PI * (element + 0.5)) / limit);
 }
 
-int comp_transform2d_init(comp_transform2d_t *t, double threshold)
+int comp_transform2d_init(comp_transform2d_t *t, double threshold, int level)
 {
     if (!(threshold > 0.0 && threshold <= 1.0))
         return -1;
+    t->level = !!level;
     for (int i = 0; i < COMP_T2D_NTHRESH; i++)
         t->threshold_sq[i] = (float)(threshold * threshold);
 
@@ -77,9 +78,13 @@ void comp_transform2d_free(comp_transform2d_t *t)
 }
 
 /* Keep only bins that look like chroma: modulated chroma is symmetric
- * about the carrier at (fsc, 72 c/aph) = (XTILE/4, YTILE/4), so compare
- * each candidate bin's squared magnitude with its reflection and keep
- * the pair only if they match within the threshold ratio. */
+ * about the carrier at (fsc, 72 c/aph) = (XTILE/4, YTILE/4). In
+ * threshold mode, compare each candidate bin's squared magnitude with
+ * its reflection and keep the pair only if they match within the
+ * threshold ratio. In level mode, set the larger of the pair to the
+ * smaller, phase preserved (GB 2365247 A): true chroma pairs have
+ * equal magnitudes and pass unchanged, so only asymmetric (luma)
+ * energy is reduced. */
 static void apply_filter(const comp_transform2d_t *t,
                          const fftwf_complex *in, fftwf_complex *out)
 {
@@ -109,6 +114,19 @@ static void apply_filter(const comp_transform2d_t *t,
             const float m_in_sq = bi[x][0] * bi[x][0] + bi[x][1] * bi[x][1];
             const float m_ref_sq = bi_ref[x_ref][0] * bi_ref[x_ref][0]
                                  + bi_ref[x_ref][1] * bi_ref[x_ref][1];
+
+            if (t->level) {
+                float f_in = 1.0f, f_ref = 1.0f;
+                if (m_in_sq > m_ref_sq)
+                    f_in = sqrtf(m_ref_sq / m_in_sq);
+                else if (m_ref_sq > m_in_sq)
+                    f_ref = sqrtf(m_in_sq / m_ref_sq);
+                bo[x][0] = bi[x][0] * f_in;
+                bo[x][1] = bi[x][1] * f_in;
+                bo_ref[x_ref][0] = bi_ref[x_ref][0] * f_ref;
+                bo_ref[x_ref][1] = bi_ref[x_ref][1] * f_ref;
+                continue;
+            }
 
             if (m_in_sq < m_ref_sq * threshold_sq ||
                 m_ref_sq < m_in_sq * threshold_sq)

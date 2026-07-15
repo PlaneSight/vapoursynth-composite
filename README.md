@@ -23,25 +23,32 @@ Alpha. PAL and NTSC round trips work:
   U/V across same-field lines before modulation (Poynton's precombing) —
   useful when encoding clean sources for comb decoders, but leave it off
   in the noise-reduction round trip, where it measurably hurts.
-- `composite.Decode(clip[, standard, width, threshold, setup, dimensions, eq])`
+- `composite.Decode(clip[, standard, width, threshold, setup, dimensions, eq, thresholds, transform, level])`
   — composite back to YUV444P16, resampled to `width` (default 720). PAL
   uses Transform PAL chroma separation with PALcolour-style demodulation
   (`threshold` is the transform's bin-symmetry ratio); NTSC uses an
   adaptive line comb. `dimensions=3` selects the spatio-temporal
   variants (3D Transform PAL / adaptive 3D comb), which draw on
-  neighbouring frames. `eq` (default 1) applies a chroma equalizer that
-  inverts the known encode+decode filter cascade, sharpening recovered
-  color; disable it for content that is essentially monochrome, where
-  it can amplify chroma leakage instead. `dimensions=1` is a
-  deliberately crude notch decoder, useful as a worst-case reference and
-  as the degradation model of `Restore`. `thresholds` overrides the
-  Transform PAL bin-symmetry test per frequency bin (80 values for
-  dimensions=2, 768 for 3); test/thresholds_pal_2d.txt is a set
-  calibrated on the VQEG 625-line corpus by test/calibrate_thresholds.py,
-  and modestly outperforms any uniform threshold for dimensions=2. A 3D
-  set (test/thresholds_pal_3d.txt) is provided for experimentation but
-  did not consistently beat uniform 0.4 in validation.
-- `composite.Restore(clip[, standard, width, threshold, setup, dimensions, eq, refine])`
+  neighbouring frames; `transform=1` further swaps the NTSC 3D comb for
+  a Transform NTSC separation, the stronger choice on motion. `eq`
+  (default 1) applies a chroma equalizer that inverts the known
+  encode+decode filter cascade, sharpening recovered color; disable it
+  for content that is essentially monochrome, where it can amplify
+  chroma leakage instead. `dimensions=1` is a deliberately crude notch
+  decoder, useful as a worst-case reference and as the degradation model
+  of `Restore`. `thresholds` overrides the Transform PAL bin-symmetry
+  test per frequency bin (80 values for dimensions=2, 768 for 3);
+  test/thresholds_pal_2d.txt is a set calibrated on the VQEG 625-line
+  corpus by test/calibrate_thresholds.py, and modestly outperforms any
+  uniform threshold for dimensions=2. A 3D set
+  (test/thresholds_pal_3d.txt) is provided for experimentation but did
+  not consistently beat uniform 0.4 in validation. `level=1` replaces
+  the transform's keep/discard test with amplitude limiting (each bin
+  pair's larger magnitude is reduced to the smaller, per GB 2365247 A):
+  measurably better on moving content and on real footage, at the cost
+  of a slightly softer separation on static synthetic detail;
+  `threshold`/`thresholds` are unused in this mode.
+- `composite.Restore(clip[, standard, width, threshold, setup, dimensions, eq, refine, thresholds, precomb, transform, level])`
   — the whole noise-reduction round trip in one call. `refine` (default
   1) runs that many analysis-by-synthesis iterations that deconvolve a
   crude-decoder model against the input picture, recovering luma detail

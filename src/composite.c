@@ -307,6 +307,14 @@ static void VS_CC comp_decode_create(const VSMap *in, VSMap *out, void *user_dat
     if (transform && dimensions != 3)
         RETERROR("transform=1 needs dimensions=3");
 
+    int level = vsapi->mapGetIntSaturated(in, "level", 0, &err);
+    if (err)
+        level = 0;
+    if (level && dimensions < 2)
+        RETERROR("level=1 needs dimensions 2 or 3");
+    if (level && d.standard == COMP_STD_NTSC && !transform)
+        RETERROR("level=1 needs transform=1 for ntsc");
+
     if (!vsh_isConstantVideoFormat(&d.vi))
         RETERROR("clip must have constant format and dimensions");
     if (d.vi.format.colorFamily != cfGray || d.vi.format.sampleType != stInteger
@@ -333,7 +341,7 @@ static void VS_CC comp_decode_create(const VSMap *in, VSMap *out, void *user_dat
         RETERROR("out of memory");
     if (comp_decode_init(d.dec, d.standard, threshold,
                          info.numThreads < 1 ? 1 : info.numThreads, setup,
-                         dimensions, eq, 0, transform)) {
+                         dimensions, eq, 0, transform, level)) {
         free(d.dec);
         d.dec = NULL;
         RETERROR("decoder initialisation failed");
@@ -343,6 +351,8 @@ static void VS_CC comp_decode_create(const VSMap *in, VSMap *out, void *user_dat
     if (nthresh > 0) {
         if (d.standard != COMP_STD_PAL)
             RETERROR("thresholds is Transform PAL only");
+        if (level)
+            RETERROR("thresholds needs the threshold mode (level=0)");
         if (dimensions == 2 && nthresh != COMP_T2D_NTHRESH)
             RETERROR("dimensions=2 needs 80 thresholds");
         if (dimensions == 3 && nthresh != COMP_T3D_NTHRESH)
@@ -456,6 +466,13 @@ static void VS_CC comp_restore_create(const VSMap *in, VSMap *out, void *user_da
     if (transform && dimensions != 3)
         RETERROR("transform=1 needs dimensions=3");
 
+    int level = vsapi->mapGetIntSaturated(in, "level", 0, &err);
+    if (err)
+        level = 0;
+    if (level && dimensions < 2)
+        RETERROR("level=1 needs dimensions 2 or 3");
+    if (level && d.standard == COMP_STD_NTSC && !transform)
+        RETERROR("level=1 needs transform=1 for ntsc");
 
     if (!vsh_isConstantVideoFormat(&d.vi))
         RETERROR("clip must have constant format and dimensions");
@@ -533,7 +550,7 @@ static void VS_CC comp_restore_create(const VSMap *in, VSMap *out, void *user_da
         RETERROR("out of memory");
     if (comp_decode_init(d.dec, d.standard, threshold,
                          info.numThreads < 1 ? 1 : info.numThreads, setup,
-                         dimensions, eq, refine, transform)) {
+                         dimensions, eq, refine, transform, level)) {
         free(d.dec);
         d.dec = NULL;
         RETERROR("decoder initialisation failed");
@@ -543,6 +560,8 @@ static void VS_CC comp_restore_create(const VSMap *in, VSMap *out, void *user_da
     if (nthresh > 0) {
         if (d.standard != COMP_STD_PAL)
             RETERROR("thresholds is Transform PAL only");
+        if (level)
+            RETERROR("thresholds needs the threshold mode (level=0)");
         if (dimensions == 2 && nthresh != COMP_T2D_NTHRESH)
             RETERROR("dimensions=2 needs 80 thresholds");
         if (dimensions == 3 && nthresh != COMP_T3D_NTHRESH)
@@ -616,7 +635,8 @@ VS_EXTERNAL_API(void) VapourSynthPluginInit2(VSPlugin *plugin, const VSPLUGINAPI
                              "dimensions:int:opt;"
                              "eq:int:opt;"
                              "thresholds:float[]:opt;"
-                             "transform:int:opt;",
+                             "transform:int:opt;"
+                             "level:int:opt;",
                              "clip:vnode;",
                              comp_decode_create, (void *)"Decode", plugin);
     vspapi->registerFunction("Restore",
@@ -630,7 +650,8 @@ VS_EXTERNAL_API(void) VapourSynthPluginInit2(VSPlugin *plugin, const VSPLUGINAPI
                              "refine:int:opt;"
                              "thresholds:float[]:opt;"
                              "precomb:int:opt;"
-                             "transform:int:opt;",
+                             "transform:int:opt;"
+                             "level:int:opt;",
                              "clip:vnode;",
                              comp_restore_create, (void *)"Restore", plugin);
 }

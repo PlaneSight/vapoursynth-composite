@@ -119,9 +119,9 @@ int main(void)
     static double want[W * ROWS];
 
     comp_transform2d_t t2d;
-    CHECK(comp_transform2d_init(&t2d, 0.4) == 0, "init");
-    CHECK(comp_transform2d_init(&t2d, 0.0) != 0, "zero threshold must be rejected");
-    CHECK(comp_transform2d_init(&t2d, 0.4) == 0, "re-init");
+    CHECK(comp_transform2d_init(&t2d, 0.4, 0) == 0, "init");
+    CHECK(comp_transform2d_init(&t2d, 0.0, 0) != 0, "zero threshold must be rejected");
+    CHECK(comp_transform2d_init(&t2d, 0.4, 0) == 0, "re-init");
 
     /* realistic input: an encoded field of color, plus noise */
     comp_encode_t enc;

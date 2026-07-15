@@ -33,6 +33,7 @@ struct comp_transform3d_t {
     fftwf_plan forward;
     fftwf_plan inverse;
     int standard;
+    int level;
     float window[COMP_T3D_ZTILE][COMP_T3D_YTILE][COMP_T3D_XTILE];
     float threshold_sq[COMP_T3D_NTHRESH];
 };
@@ -41,8 +42,10 @@ struct comp_transform3d_t {
  * variant (after the ld-decode transform-ntsc branch) reflects about
  * (fsc, 120 c/aph, 15 Hz) with luma-reference evidence and a
  * frequency-shaped threshold, since NTSC's shared U/V carrier makes
- * the symmetry only approximate */
-int comp_transform3d_init(comp_transform3d_t *t, double threshold, int standard);
+ * the symmetry only approximate. level selects amplitude limiting
+ * instead of the threshold test (threshold then unused). */
+int comp_transform3d_init(comp_transform3d_t *t, double threshold, int standard,
+                          int level);
 void comp_transform3d_free(comp_transform3d_t *t);
 
 /* Extract the chroma of the two fields of output frame `frame`.

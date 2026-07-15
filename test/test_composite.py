@@ -257,4 +257,34 @@ except vs.Error as e:
 else:
     assert False, 'refine=99 accepted'
 
+# ---- level mode: amplitude limiting instead of the threshold test
+lv = core.composite.Decode(enc_t, level=1)
+fr = lv.get_frame(0)
+for pl, want in enumerate((30000, 40960, 28672)):
+    vals = [fr[pl][r, x] for r in (100, 288, 475) for x in range(48, 312, 8)]
+    worst = max(abs(v - want) for v in vals)
+    assert worst <= 96, ('pal2d-level', pl, want, worst)
+assert bytes(lv.get_frame(0)[0]) != bytes(ts.get_frame(0)[0])
+core.composite.Decode(enc_t, level=1, dimensions=3).get_frame(0)
+core.composite.Restore(tex, level=1).get_frame(0)
+ntf_lv = core.composite.Decode(core.composite.Encode(bff9, standard='ntsc'),
+                               standard='ntsc', dimensions=3, transform=1,
+                               level=1)
+fr = ntf_lv.get_frame(4)
+for pl, want in enumerate((32128, 40960, 28672)):
+    vals = [fr[pl][r, x] for r in (30, 240, 445) for x in range(64, 656, 8)]
+    worst = max(abs(v - want) for v in vals)
+    assert worst <= 96, ('ntsc-transform3d-level', pl, want, worst)
+for bad_kw, needle in ((dict(level=1, dimensions=1), 'dimensions 2 or 3'),
+                       (dict(level=1, standard='ntsc', dimensions=3), 'transform=1'),
+                       (dict(level=1, thresholds=[0.4] * 80), 'level=0')):
+    try:
+        core.composite.Decode(core.composite.Encode(bff, standard='ntsc')
+                              if bad_kw.get('standard') == 'ntsc' else enc_t,
+                              **bad_kw)
+    except vs.Error as e:
+        assert needle in str(e), (needle, str(e))
+    else:
+        assert False, f'expected error: {needle}'
+
 print('test_composite: all tests passed')

@@ -64,10 +64,11 @@ struct comp_decode_t {
  * bin-symmetry ratio. eq enables the chroma cascade equalizer; refine
  * is the number of Y-only Landweber refinement iterations against the
  * dimensions=1 model; use_transform selects Transform NTSC separation
- * instead of the comb (NTSC, dimensions=3 only). */
+ * instead of the comb (NTSC, dimensions=3 only); level selects the
+ * transform's amplitude-limiting mode (threshold then unused). */
 int comp_decode_init(comp_decode_t *d, int standard, double threshold,
                      int nscratch, int setup, int dimensions, int eq, int refine,
-                     int use_transform);
+                     int use_transform, int level);
 void comp_decode_free(comp_decode_t *d);
 
 /* override the Transform PAL per-bin thresholds after init; n must be
