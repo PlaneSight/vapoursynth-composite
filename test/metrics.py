@@ -22,9 +22,7 @@ import numpy as np
 import vapoursynth as vs
 
 core = vs.core
-core.std.LoadPlugin(sys.argv[1])
-STANDARDS = [sys.argv[2]] if len(sys.argv) > 2 and sys.argv[2] != 'both' else ['pal', 'ntsc']
-NFRAMES = int(sys.argv[3]) if len(sys.argv) > 3 else 12
+NFRAMES = 12
 
 W601 = 720
 
@@ -219,6 +217,7 @@ FFMPEG = find_ffmpeg()
 HAVE_XPSNR = FFMPEG is not None
 
 
+
 def xpsnr(out, ref):
     n, _, h, w = out.shape
     with tempfile.NamedTemporaryFile(suffix='.raw', delete=False) as fa, \
@@ -242,43 +241,55 @@ def xpsnr(out, ref):
             return vals
     return None
 HAVE_SSIMU2 = hasattr(core, 'vszip')
-if not HAVE_XPSNR:
-    print('note: ffmpeg xpsnr filter unavailable, skipping XPSNR')
-if not HAVE_SSIMU2:
-    print('note: vszip unavailable, skipping SSIMULACRA2')
 
-for standard in STANDARDS:
-    h, wr, row_off = geometry(standard)
-    print(f'\n=== {standard.upper()} ({W601}x{h}, {NFRAMES} frames) ===')
 
-    for name, clean in make_sources(h).items():
-        clean_clip = clip_from(clean)
-        comp = to_array(core.composite.Encode(clean_clip, standard=standard))
+def main():
+    global NFRAMES
+    core.std.LoadPlugin(sys.argv[1])
+    standards = [sys.argv[2]] if len(sys.argv) > 2 and sys.argv[2] != 'both' else ['pal', 'ntsc']
+    if len(sys.argv) > 3:
+        NFRAMES = int(sys.argv[3])
+    if not HAVE_XPSNR:
+        print('note: ffmpeg xpsnr filter unavailable, skipping XPSNR')
+    if not HAVE_SSIMU2:
+        print('note: vszip unavailable, skipping SSIMULACRA2')
 
-        degraded = to_array(raster_to_601(bad_decode(comp, standard, row_off), standard, h))
-        print(f'{name}:')
-        print(fmt('degraded', score(degraded, clean)))
+    for standard in standards:
+        h, wr, row_off = geometry(standard)
+        print(f'\n=== {standard.upper()} ({W601}x{h}, {NFRAMES} frames) ===')
 
-        recomp = core.composite.Encode(clip_from(degraded), standard=standard)
-        if standard == 'pal':
-            configs = [('NR 2D t=0.4', dict(dimensions=2, threshold=0.4)),
-                       ('NR 2D eq=0', dict(dimensions=2, eq=0)),
-                       ('NR 2D t=0.7', dict(dimensions=2, threshold=0.7)),
-                       ('NR 3D t=0.4', dict(dimensions=3, threshold=0.4)),
-                       ('NR 3D t=0.7', dict(dimensions=3, threshold=0.7))]
-        else:
-            configs = [('NR 2D', dict(dimensions=2)),
-                       ('NR 2D eq=0', dict(dimensions=2, eq=0)),
-                       ('NR 3D', dict(dimensions=3))]
-        for cname, kw in configs:
-            nr = to_array(core.composite.Decode(recomp, standard=standard, **kw))
-            print(fmt(cname, score(nr, clean)))
+        for name, clean in make_sources(h).items():
+            clean_clip = clip_from(clean)
+            comp = to_array(core.composite.Encode(clean_clip, standard=standard))
 
-        for rn in (1, 2, 4):
-            rest = to_array(core.composite.Restore(clip_from(degraded),
-                                                   standard=standard, refine=rn))
-            print(fmt(f'Restore r={rn}', score(rest, clean)))
+            degraded = to_array(raster_to_601(bad_decode(comp, standard, row_off), standard, h))
+            print(f'{name}:')
+            print(fmt('degraded', score(degraded, clean)))
 
-        transparent = to_array(core.composite.Decode(
-            core.composite.Encode(clean_clip, standard=standard), standard=standard))
-        print(fmt('transparency 2D', score(transparent, clean)))
+            recomp = core.composite.Encode(clip_from(degraded), standard=standard)
+            if standard == 'pal':
+                configs = [('NR 2D t=0.4', dict(dimensions=2, threshold=0.4)),
+                           ('NR 2D eq=0', dict(dimensions=2, eq=0)),
+                           ('NR 2D t=0.7', dict(dimensions=2, threshold=0.7)),
+                           ('NR 3D t=0.4', dict(dimensions=3, threshold=0.4)),
+                           ('NR 3D t=0.7', dict(dimensions=3, threshold=0.7))]
+            else:
+                configs = [('NR 2D', dict(dimensions=2)),
+                           ('NR 2D eq=0', dict(dimensions=2, eq=0)),
+                           ('NR 3D', dict(dimensions=3))]
+            for cname, kw in configs:
+                nr = to_array(core.composite.Decode(recomp, standard=standard, **kw))
+                print(fmt(cname, score(nr, clean)))
+
+            for rn in (1, 2, 4):
+                rest = to_array(core.composite.Restore(clip_from(degraded),
+                                                       standard=standard, refine=rn))
+                print(fmt(f'Restore r={rn}', score(rest, clean)))
+
+            transparent = to_array(core.composite.Decode(
+                core.composite.Encode(clean_clip, standard=standard), standard=standard))
+            print(fmt('transparency 2D', score(transparent, clean)))
+
+
+if __name__ == '__main__':
+    main()

@@ -31,7 +31,13 @@ Alpha. PAL and NTSC round trips work:
   color; disable it for content that is essentially monochrome, where
   it can amplify chroma leakage instead. `dimensions=1` is a
   deliberately crude notch decoder, useful as a worst-case reference and
-  as the degradation model of `Restore`.
+  as the degradation model of `Restore`. `thresholds` overrides the
+  Transform PAL bin-symmetry test per frequency bin (80 values for
+  dimensions=2, 768 for 3); test/thresholds_pal_2d.txt is a set
+  calibrated on the VQEG 625-line corpus by test/calibrate_thresholds.py,
+  and modestly outperforms any uniform threshold for dimensions=2. A 3D
+  set (test/thresholds_pal_3d.txt) is provided for experimentation but
+  did not consistently beat uniform 0.4 in validation.
 - `composite.Restore(clip[, standard, width, threshold, setup, dimensions, eq, refine])`
   — the whole noise-reduction round trip in one call. `refine` (default
   1) runs that many analysis-by-synthesis iterations that deconvolve a
