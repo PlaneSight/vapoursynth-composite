@@ -54,7 +54,7 @@ static void test_ntsc_roundtrip(int setup, int rows, int row_off)
     const int w = COMP_ACTIVE_WIDTH_NTSC;
 
     CHECK(comp_encode_init(&enc, COMP_STD_NTSC, setup) == 0, "ntsc encode init");
-    CHECK(comp_decode_init(&dec, COMP_STD_NTSC, 0.4, 1, setup, 2) == 0, "ntsc decode init");
+    CHECK(comp_decode_init(&dec, COMP_STD_NTSC, 0.4, 1, setup, 2, 0) == 0, "ntsc decode init");
 
     for (int r = 0; r < rows; r++) {
         for (int x = 0; x < w; x++) {
@@ -128,7 +128,7 @@ static void test_3d_roundtrip(int standard)
     comp_decode_t dec;
 
     CHECK(comp_encode_init(&enc, standard, 0) == 0, "3d encode init");
-    CHECK(comp_decode_init(&dec, standard, 0.4, 1, 0, 3) == 0, "3d decode init");
+    CHECK(comp_decode_init(&dec, standard, 0.4, 1, 0, 3, 0) == 0, "3d decode init");
     const int look = comp_decode_look(&dec);
     CHECK(look == (pal ? 3 : 1), "3d look");
 
@@ -204,13 +204,77 @@ static void test_3d_roundtrip(int standard)
     comp_decode_free(&dec);
 }
 
+
+/* the cascade equalizer must sharpen chroma (lower round-trip error on
+ * a chroma frequency sweep) without disturbing flat chroma */
+static void test_eq(void)
+{
+    comp_encode_t enc;
+    comp_decode_t dec0, dec1;
+    const int w = COMP_ACTIVE_WIDTH_PAL;
+
+    CHECK(comp_encode_init(&enc, COMP_STD_PAL, 0) == 0, "eq encode init");
+    CHECK(comp_decode_init(&dec0, COMP_STD_PAL, 0.4, 1, 0, 2, 0) == 0, "eq=0 init");
+    CHECK(comp_decode_init(&dec1, COMP_STD_PAL, 0.4, 1, 0, 2, 1) == 0, "eq=1 init");
+
+    /* flat luma, U carries a horizontal frequency sweep */
+    for (int r = 0; r < H; r++) {
+        for (int x = 0; x < w; x++) {
+            srcy[r][x] = 30000;
+            srcu[r][x] = (uint16_t)(32768 + 8000.0 * sin(x * x * 0.00025));
+            srcv[r][x] = 32768;
+        }
+    }
+    for (int r = 0; r < H; r++)
+        comp_encode_line(&enc, comp[r], srcy[r], srcu[r], srcv[r],
+                         comp_sc_line(COMP_STD_PAL, 0, r));
+
+    const comp_frame_view_t v = { comp[0], w };
+    const int vf = 0;
+    double err[2];
+    comp_decode_t *decs[2] = { &dec0, &dec1 };
+    for (int e = 0; e < 2; e++) {
+        comp_decode_frame(decs[e], 0, 1, H, 0, &v, &vf, 0,
+                          outy[0], w, outu[0], w, outv[0], w);
+        double sum = 0.0;
+        for (int r = 32; r < H - 32; r++)
+            for (int x = 48; x < w - 48; x++) {
+                const double dd = (double)outu[r][x] - srcu[r][x];
+                sum += dd * dd;
+            }
+        err[e] = sum;
+    }
+    printf("test_decode: eq sweep U mse ratio %.3f (eq=1/eq=0)\n", err[1] / err[0]);
+    CHECK(err[1] < err[0] * 0.75, "equalizer did not improve the sweep (%f)", err[1] / err[0]);
+
+    /* flat chroma is preserved to within quantization */
+    for (int r = 0; r < H; r++)
+        for (int x = 0; x < w; x++) {
+            srcu[r][x] = 40960;
+            srcv[r][x] = 28672;
+        }
+    for (int r = 0; r < H; r++)
+        comp_encode_line(&enc, comp[r], srcy[r], srcu[r], srcv[r],
+                         comp_sc_line(COMP_STD_PAL, 0, r));
+    comp_decode_frame(&dec1, 0, 1, H, 0, &v, &vf, 0,
+                      outy[0], w, outu[0], w, outv[0], w);
+    for (int r = 32; r < H - 32; r += 61)
+        for (int x = 48; x < w - 48; x += 13) {
+            CHECK(abs((int)outu[r][x] - 40960) <= 64, "eq flat U %d at %d,%d", outu[r][x], r, x);
+            CHECK(abs((int)outv[r][x] - 28672) <= 64, "eq flat V %d at %d,%d", outv[r][x], r, x);
+        }
+
+    comp_decode_free(&dec0);
+    comp_decode_free(&dec1);
+}
+
 int main(void)
 {
     comp_encode_t enc;
     comp_decode_t dec;
 
     CHECK(comp_encode_init(&enc, COMP_STD_PAL, 0) == 0, "encode init");
-    CHECK(comp_decode_init(&dec, COMP_STD_PAL, 0.4, 2, 0, 2) == 0, "decode init");
+    CHECK(comp_decode_init(&dec, COMP_STD_PAL, 0.4, 2, 0, 2, 0) == 0, "decode init");
 
     /* top half: color bars; bottom half: smooth chroma gradients */
     for (int r = 0; r < H; r++) {
@@ -279,6 +343,8 @@ int main(void)
 
     test_3d_roundtrip(COMP_STD_PAL);
     test_3d_roundtrip(COMP_STD_NTSC);
+
+    test_eq();
 
     if (!fail)
         printf("test_decode: all tests passed\n");

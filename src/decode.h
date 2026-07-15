@@ -10,6 +10,7 @@
 #include "transform3d.h"
 
 #define COMP_DECODE_FILTER_SIZE 7
+#define COMP_EQ_TAPS 31
 
 typedef struct comp_decode_scratch_t comp_decode_scratch_t;
 
@@ -39,6 +40,8 @@ struct comp_decode_t {
     int32_t level_black;
     int32_t luma_num, luma_den;  /* y16 = 4096 + (level - black) * num/den */
     int32_t comb_krange;         /* NTSC 2D comb adaptivity range */
+    int eq;                      /* chroma cascade equalizer enabled */
+    int32_t eq_q15[COMP_EQ_TAPS];
     int16_t sin_q15[COMP_SC_DEN_PAL];
     int32_t cfilt_q16[COMP_DECODE_FILTER_SIZE + 1][4];
     comp_transform2d_t transform;
@@ -53,9 +56,10 @@ struct comp_decode_t {
 
 /* nscratch is the maximum number of concurrent frame requests. setup
  * selects the NTSC 7.5 IRE pedestal; threshold is Transform PAL's
- * bin-symmetry ratio; each is ignored by the other standard. */
+ * bin-symmetry ratio; each is ignored by the other standard. eq enables
+ * the chroma cascade equalizer. */
 int comp_decode_init(comp_decode_t *d, int standard, double threshold,
-                     int nscratch, int setup, int dimensions);
+                     int nscratch, int setup, int dimensions, int eq);
 void comp_decode_free(comp_decode_t *d);
 
 /* source frames needed each side of the decoded frame */

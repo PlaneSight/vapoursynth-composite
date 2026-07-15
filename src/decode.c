@@ -43,8 +43,56 @@ static const int16_t colorlp_q15[COLORLP_TAPS] = {
     9094, 3726, -503, -1597, -682, 200, 317, 73,
 };
 
+/* response of a symmetric FIR (Q15 taps) at normalized angular freq w */
+static double fir_response_q15(const int16_t *taps, int n, double w)
+{
+    double sum = 0.0;
+    for (int k = 0; k < n; k++)
+        sum += taps[k] / 32768.0 * cos(w * (k - (n - 1) / 2.0));
+    return sum;
+}
+
+/* Design the chroma cascade equalizer: the inverse of the known
+ * encode-filter x decode-filter chroma response, boost capped at 12 dB,
+ * Hann-windowed to COMP_EQ_TAPS taps with an exactly unity cascade at
+ * DC. dec_taps is the decoder's post-demod profile in 1/32768 units. */
+static void design_eq(comp_decode_t *d, const int16_t *enc_taps, int enc_n,
+                      const double *dec_taps, int dec_n)
+{
+    enum { M = 256 };
+    double heq[M / 2 + 1];
+    double h[COMP_EQ_TAPS];
+    const int c = COMP_EQ_TAPS / 2;
+
+    for (int m = 0; m <= M / 2; m++) {
+        const double w = 2.0 * M_PI * m / M;
+        double dec = 0.0;
+        for (int k = 0; k < dec_n; k++)
+            dec += dec_taps[k] * cos(w * (k - (dec_n - 1) / 2.0));
+        const double g = fir_response_q15(enc_taps, enc_n, w) * dec;
+        heq[m] = g > 0.25 ? 1.0 / g : 4.0;
+        if (heq[m] > 4.0)
+            heq[m] = 4.0;
+        if (heq[m] < 0.0)
+            heq[m] = 0.0;
+    }
+
+    double dc = 0.0;
+    for (int j = 0; j < COMP_EQ_TAPS; j++) {
+        double sum = heq[0];
+        for (int m = 1; m < M / 2; m++)
+            sum += 2.0 * heq[m] * cos(2.0 * M_PI * m * (j - c) / M);
+        sum += heq[M / 2] * cos(M_PI * (j - c));
+        const double hann = 0.5 + 0.5 * cos(M_PI * (j - c) / (c + 1));
+        h[j] = sum / M * hann;
+        dc += h[j];
+    }
+    for (int j = 0; j < COMP_EQ_TAPS; j++)
+        d->eq_q15[j] = (int32_t)lrint(h[j] * (heq[0] / dc) * 32768.0);
+}
+
 int comp_decode_init(comp_decode_t *d, int standard, double threshold,
-                     int nscratch, int setup, int dimensions)
+                     int nscratch, int setup, int dimensions, int eq)
 {
     comp_encode_t enc;
 
@@ -58,6 +106,7 @@ int comp_decode_init(comp_decode_t *d, int standard, double threshold,
         return -1;
     d->standard = standard;
     d->dimensions = dimensions;
+    d->eq = !!eq;
     d->width = enc.width;
     d->height = standard == COMP_STD_PAL ? COMP_ACTIVE_HEIGHT_PAL
                                          : COMP_ACTIVE_HEIGHT_NTSC;
@@ -97,12 +146,32 @@ int comp_decode_init(comp_decode_t *d, int standard, double threshold,
             for (int k = 0; k < 4; k++)
                 d->cfilt_q16[f][k] = (int32_t)lrint(cfilt[f][k] / cdiv * 65536.0);
 
+        if (eq) {
+            /* the filter's horizontal profile: for vertically flat
+             * chroma the U path reduces to these mirrored taps */
+            double prof[2 * FS + 1];
+            for (int f = -FS; f <= FS; f++) {
+                const int a = f < 0 ? -f : f;
+                prof[FS + f] = (cfilt[a][0] + 2 * cfilt[a][1]
+                              + 2 * cfilt[a][2] + 2 * cfilt[a][3]) / cdiv
+                             * (f == 0 ? 2.0 : 1.0);
+            }
+            design_eq(d, enc.uv_taps, enc.uv_ntaps, prof, 2 * FS + 1);
+        }
+
         if (dimensions == 2 ? comp_transform2d_init(&d->transform, threshold)
                             : comp_transform3d_init(&d->transform3, threshold))
             return -1;
     } else {
         /* the comb's adaptivity range: 45 IRE of the encoded span */
         d->comb_krange = (int32_t)lrint(45.0 * (0xC800 - d->level_black) / 100.0);
+
+        if (eq) {
+            double prof[COLORLP_TAPS];
+            for (int k = 0; k < COLORLP_TAPS; k++)
+                prof[k] = colorlp_q15[k] / 32768.0;
+            design_eq(d, enc.uv_taps, enc.uv_ntaps, prof, COLORLP_TAPS);
+        }
     }
 
     d->scratch = calloc(nscratch, sizeof(*d->scratch));
@@ -183,6 +252,22 @@ static void scratch_release(comp_decode_t *d, comp_decode_scratch_t *s)
     pthread_mutex_unlock(&d->lock);
 }
 
+/* equalize one row of demodulated chroma levels in place */
+static void eq_row(const comp_decode_t *d, const int32_t *in, int32_t *out, int w)
+{
+    const int half = COMP_EQ_TAPS / 2;
+
+    for (int x = 0; x < w; x++) {
+        int64_t acc = 0;
+        for (int j = 0; j < COMP_EQ_TAPS; j++) {
+            const int k = x + j - half;
+            if (k >= 0 && k < w)
+                acc += (int64_t)d->eq_q15[j] * in[k];
+        }
+        out[x] = (int32_t)((acc + 16384) >> 15);
+    }
+}
+
 static inline int32_t rdiv(int64_t num, int32_t den)
 {
     return (int32_t)((num >= 0 ? num + den / 2 : num - den / 2) / den);
@@ -257,6 +342,7 @@ static void pal_decode_field(const comp_decode_t *d, int frame, int field,
         uint16_t *outy = dsty + row * ystride;
         uint16_t *outu = dstu + row * ustride;
         uint16_t *outv = dstv + row * vstride;
+        int32_t u_row[WIDTH], v_row[WIDTH], u_eq[WIDTH], v_eq[WIDTH];
 
         for (int x = 0; x < w; x++) {
             int64_t pu = 0, qu = 0, pv = 0, qv = 0;
@@ -289,17 +375,27 @@ static void pal_decode_field(const comp_decode_t *d, int frame, int field,
 
             /* rotate onto the U/V axes and double (the filter recovers
              * chroma at half amplitude); bp/bq are Q15, so >> 14 */
-            const int32_t ul = (int32_t)(-((int64_t)pu0 * bp + (int64_t)qu0 * bq + 8192) >> 14);
-            const int32_t vl = sc.vswitch *
+            u_row[x] = (int32_t)(-((int64_t)pu0 * bp + (int64_t)qu0 * bq + 8192) >> 14);
+            v_row[x] = sc.vswitch *
                 (int32_t)(-((int64_t)qv0 * bp - (int64_t)pv0 * bq + 8192) >> 14);
 
             /* luma is the composite minus the separated chroma */
             const int32_t yl = (int32_t)comp_row[x] - in0[x];
-
-            /* invert the encoder's level mappings */
             outy[x] = clamp_u16(4096 + rdiv((int64_t)(yl - d->level_black) * d->luma_num, d->luma_den));
-            outu[x] = clamp_u16(32768 + rdiv((int64_t)ul * 32768, d->ku));
-            outv[x] = clamp_u16(32768 + rdiv((int64_t)vl * 32768, d->kv));
+        }
+
+        const int32_t *u_out = u_row, *v_out = v_row;
+        if (d->eq) {
+            eq_row(d, u_row, u_eq, w);
+            eq_row(d, v_row, v_eq, w);
+            u_out = u_eq;
+            v_out = v_eq;
+        }
+
+        /* invert the encoder's level mappings */
+        for (int x = 0; x < w; x++) {
+            outu[x] = clamp_u16(32768 + rdiv((int64_t)u_out[x] * 32768, d->ku));
+            outv[x] = clamp_u16(32768 + rdiv((int64_t)v_out[x] * 32768, d->kv));
         }
     }
 }
@@ -505,6 +601,9 @@ static void ntsc_demod_line(const comp_decode_t *d, int frame, int raster_row,
     const int32_t s4[4] = { sn0, cs0, -sn0, -cs0 };
     const int32_t c4[4] = { cs0, -sn0, -cs0, sn0 };
 
+    int32_t u_row[COMP_ACTIVE_WIDTH_NTSC], v_row[COMP_ACTIVE_WIDTH_NTSC];
+    int32_t u_eq[COMP_ACTIVE_WIDTH_NTSC], v_eq[COMP_ACTIVE_WIDTH_NTSC];
+
     for (int x = 0; x < w; x++) {
         int64_t p = 0, q = 0;
         for (int j = 0; j < COLORLP_TAPS; j++) {
@@ -516,15 +615,29 @@ static void ntsc_demod_line(const comp_decode_t *d, int frame, int raster_row,
 
         const int32_t ul = (int32_t)(-((int64_t)p0 * bp + (int64_t)q0 * bq + 8192) >> 14);
         const int32_t vl = (int32_t)(-((int64_t)q0 * bp - (int64_t)p0 * bq + 8192) >> 14);
+        u_row[x] = ul;
+        v_row[x] = vl;
 
-        /* comb.cpp adjustY: subtract the filtered chroma, resynthesised
-         * on the carrier, rather than the raw comb output */
+        /* comb.cpp adjustY: subtract the filtered chroma, resynthesized
+         * on the carrier, rather than the raw comb output; this must use
+         * the chroma as the encoder sent it, so it taps the values
+         * before equalization */
         const int32_t re = (ul * s4[x & 3] + vl * c4[x & 3] + 16384) >> 15;
         const int32_t yl = (int32_t)comp_row[x] - re;
-
         outy[x] = clamp_u16(4096 + rdiv((int64_t)(yl - d->level_black) * d->luma_num, d->luma_den));
-        outu[x] = clamp_u16(32768 + rdiv((int64_t)ul * 32768, d->ku));
-        outv[x] = clamp_u16(32768 + rdiv((int64_t)vl * 32768, d->kv));
+    }
+
+    const int32_t *u_out = u_row, *v_out = v_row;
+    if (d->eq) {
+        eq_row(d, u_row, u_eq, w);
+        eq_row(d, v_row, v_eq, w);
+        u_out = u_eq;
+        v_out = v_eq;
+    }
+
+    for (int x = 0; x < w; x++) {
+        outu[x] = clamp_u16(32768 + rdiv((int64_t)u_out[x] * 32768, d->ku));
+        outv[x] = clamp_u16(32768 + rdiv((int64_t)v_out[x] * 32768, d->kv));
     }
 }
 

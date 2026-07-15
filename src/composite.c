@@ -283,6 +283,10 @@ static void VS_CC comp_decode_create(const VSMap *in, VSMap *out, void *user_dat
     if (dimensions != 2 && dimensions != 3)
         RETERROR("dimensions must be 2 or 3");
 
+    int eq = vsapi->mapGetIntSaturated(in, "eq", 0, &err);
+    if (err)
+        eq = 1;
+
     if (!vsh_isConstantVideoFormat(&d.vi))
         RETERROR("clip must have constant format and dimensions");
     if (d.vi.format.colorFamily != cfGray || d.vi.format.sampleType != stInteger
@@ -308,7 +312,7 @@ static void VS_CC comp_decode_create(const VSMap *in, VSMap *out, void *user_dat
     if (!d.dec)
         RETERROR("out of memory");
     if (comp_decode_init(d.dec, d.standard, threshold,
-                         info.numThreads < 1 ? 1 : info.numThreads, setup, dimensions)) {
+                         info.numThreads < 1 ? 1 : info.numThreads, setup, dimensions, eq)) {
         free(d.dec);
         d.dec = NULL;
         RETERROR("decoder initialisation failed");
@@ -375,7 +379,8 @@ VS_EXTERNAL_API(void) VapourSynthPluginInit2(VSPlugin *plugin, const VSPLUGINAPI
                              "width:int:opt;"
                              "threshold:float:opt;"
                              "setup:int:opt;"
-                             "dimensions:int:opt;",
+                             "dimensions:int:opt;"
+                             "eq:int:opt;",
                              "clip:vnode;",
                              comp_decode_create, (void *)"Decode", plugin);
 }

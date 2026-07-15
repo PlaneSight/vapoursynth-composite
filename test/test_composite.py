@@ -163,6 +163,13 @@ for pl, want in enumerate((32128, 40960, 28672)):
     worst = max(abs(v - want) for v in vals)
     assert worst <= 96, ('ntsc3d', pl, want, worst)
 
+# ---- eq: on by default; disabling changes chroma on textured content
+tex = core.std.StackHorizontal([flat([30000, 40960, 28672], w=360),
+                                flat([30000, 24576, 36864], w=360)])
+enc_t = core.composite.Encode(tex)
+assert bytes(core.composite.Decode(enc_t).get_frame(0)[1]) != \
+       bytes(core.composite.Decode(enc_t, eq=0).get_frame(0)[1])
+
 try:
     core.composite.Decode(core.std.BlankClip(format=vs.GRAY16, width=928, height=576),
                           dimensions=4)
