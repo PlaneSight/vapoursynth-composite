@@ -18,7 +18,7 @@ threads_dep = dependency('threads')
 core_deps = [m_dep, fftw3f_dep, threads_dep]
 
 core = static_library('composite_core',
-    files('src/subcarrier.c', 'src/encode.c', 'src/transform2d.c'),
+    files('src/subcarrier.c', 'src/encode.c', 'src/transform2d.c', 'src/decode.c'),
     dependencies: core_deps,
     gnu_symbol_visibility: 'hidden',
     pic: true,
@@ -52,6 +52,13 @@ test('encode', executable('test_encode',
 test('transform2d', executable('test_transform2d',
     files('test/test_transform2d.c'),
     dependencies: core_deps + dependency('fftw3'),
+    include_directories: include_directories('src'),
+    link_with: core,
+))
+
+test('decode', executable('test_decode',
+    files('test/test_decode.c'),
+    dependencies: core_deps,
     include_directories: include_directories('src'),
     link_with: core,
 ))
