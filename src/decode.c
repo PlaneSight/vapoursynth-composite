@@ -1,12 +1,20 @@
 /*
- * PAL composite decoding: 2D Transform PAL chroma separation followed by
- * PALcolour-style demodulation, a fixed-point port of ld-chroma-decoder's
- * palcolour.cpp transform path.
+ * Composite decoding.
  *
- * The reference recovers each line's subcarrier phase and V-switch state
- * from the colour burst; this raster carries no burst, and both ends of
- * the round trip share the same deterministic subcarrier sequence, so the
- * decoder substitutes the exact values the encoder used.
+ * PAL: 2D Transform PAL chroma separation followed by PALcolour-style
+ * demodulation (ports of ld-chroma-decoder's transformpal2d.cpp and
+ * palcolour.cpp transform path).
+ *
+ * NTSC: 2D line comb separation followed by product demodulation and
+ * the color low-pass (port of comb.cpp split1D/split2D/filterIQ, with
+ * luma reconstructed from resynthesized filtered chroma as in adjustY).
+ *
+ * The references recover line phase from the color burst or field
+ * metadata; this raster carries neither, and both ends of the round
+ * trip share the same deterministic subcarrier sequence, so the decoder
+ * substitutes the exact values the encoder used. Separation heuristics
+ * run in float; demodulation, filtering, and level mapping are fixed
+ * point.
  */
 
 #include <math.h>
@@ -14,6 +22,7 @@
 #include <string.h>
 
 #include "decode.h"
+#include "encode.h"
 
 #ifndef M_PI
 #define M_PI 3.14159265358979323846
@@ -22,25 +31,47 @@
 #define FS COMP_DECODE_FILTER_SIZE
 #define WIDTH COMP_ACTIVE_WIDTH_PAL
 
-/* all-zero chroma used for lines beyond the field edges */
+/* all-zero chroma used for lines beyond the edges */
 static const int16_t zero_line[WIDTH];
+static const float zero_line_f[WIDTH];
 
-int comp_decode_init(comp_decode_t *d, int standard, double threshold, int nscratch)
+/* color low-pass for the demodulated NTSC products (deemp.h
+ * c_colorlp_b rounded to Q15; the reference's +0.2% DC gain is kept) */
+#define COLORLP_TAPS 17
+static const int16_t colorlp_q15[COLORLP_TAPS] = {
+    73, 317, 200, -682, -1597, -503, 3726, 9094, 11579,
+    9094, 3726, -503, -1597, -682, 200, 317, 73,
+};
+
+int comp_decode_init(comp_decode_t *d, int standard, double threshold,
+                     int nscratch, int setup)
 {
-    if (standard != COMP_STD_PAL || nscratch < 1)
+    comp_encode_t enc;
+
+    if (nscratch < 1)
         return -1;
 
     memset(d, 0, sizeof(*d));
-    d->standard = standard;
-    d->width = WIDTH;
-    d->height = COMP_ACTIVE_HEIGHT_PAL;
-    d->den = COMP_SC_DEN_PAL;
-    comp_sc_sin_q15(d->den, d->sin_q15);
 
-    /* PALcolour's 2D chroma filter: raised-cosine, ~1.18 MHz, horizontal
-     * taps 0..FS mirrored, vertical taps at 0/±2/±1/±3 field lines (in
-     * that array order). Computed in double, applied in Q16. */
-    {
+    /* levels and chroma scales must match the encoder exactly */
+    if (comp_encode_init(&enc, standard, setup))
+        return -1;
+    d->standard = standard;
+    d->width = enc.width;
+    d->height = standard == COMP_STD_PAL ? COMP_ACTIVE_HEIGHT_PAL
+                                         : COMP_ACTIVE_HEIGHT_NTSC;
+    d->den = enc.den;
+    d->ku = enc.ku;
+    d->kv = enc.kv;
+    d->level_black = enc.level_black;
+    d->luma_num = enc.luma_den;  /* the inverse slope */
+    d->luma_den = enc.luma_num;
+    memcpy(d->sin_q15, enc.sin_q15, sizeof(d->sin_q15));
+
+    if (standard == COMP_STD_PAL) {
+        /* PALcolour's 2D chroma filter: raised-cosine, ~1.18 MHz,
+         * horizontal taps 0..FS mirrored, vertical taps at 0/±2/±1/±3
+         * field lines (in that array order). Double at init, Q16 use. */
         const double fs_hz = 4.0 * 4433618.75;
         const double bw_hz = 1100000.0 / 0.93;
         const double ca = 0.5 * fs_hz / bw_hz;
@@ -64,10 +95,13 @@ int comp_decode_init(comp_decode_t *d, int standard, double threshold, int nscra
         for (int f = 0; f <= FS; f++)
             for (int k = 0; k < 4; k++)
                 d->cfilt_q16[f][k] = (int32_t)lrint(cfilt[f][k] / cdiv * 65536.0);
-    }
 
-    if (comp_transform2d_init(&d->transform, threshold))
-        return -1;
+        if (comp_transform2d_init(&d->transform, threshold))
+            return -1;
+    } else {
+        /* the comb's adaptivity range: 45 IRE of the encoded span */
+        d->comb_krange = (int32_t)lrint(45.0 * (0xC800 - d->level_black) / 100.0);
+    }
 
     d->scratch = calloc(nscratch, sizeof(*d->scratch));
     if (!d->scratch) {
@@ -76,8 +110,8 @@ int comp_decode_init(comp_decode_t *d, int standard, double threshold, int nscra
     }
     d->nscratch = nscratch;
     for (int i = 0; i < nscratch; i++) {
-        d->scratch[i].chroma_f = malloc(sizeof(float) * WIDTH * d->height);
-        d->scratch[i].chroma = malloc(sizeof(int16_t) * WIDTH * d->height);
+        d->scratch[i].chroma_f = malloc(sizeof(float) * d->width * d->height);
+        d->scratch[i].chroma = malloc(sizeof(int16_t) * d->width * d->height);
         if (!d->scratch[i].chroma_f || !d->scratch[i].chroma) {
             comp_decode_free(d);
             return -1;
@@ -100,7 +134,8 @@ void comp_decode_free(comp_decode_t *d)
         pthread_mutex_destroy(&d->lock);
         pthread_cond_destroy(&d->cond);
     }
-    comp_transform2d_free(&d->transform);
+    if (d->standard == COMP_STD_PAL)
+        comp_transform2d_free(&d->transform);
 }
 
 static comp_decode_scratch_t *scratch_acquire(comp_decode_t *d)
@@ -136,14 +171,19 @@ static inline uint16_t clamp_u16(int32_t v)
     return (uint16_t)(v < 0 ? 0 : v > 65535 ? 65535 : v);
 }
 
-/* Demodulate one field. comp and chroma are field views; the output
+static inline int16_t clamp_i16(long v)
+{
+    return (int16_t)(v < -32768 ? -32768 : v > 32767 ? 32767 : v);
+}
+
+/* Demodulate one PAL field. comp and chroma are field views; the output
  * pointers are frame planes, written at rows 2*fieldline + field. */
-static void decode_field(const comp_decode_t *d, int frame, int field,
-                         const uint16_t *comp, ptrdiff_t comp_stride,
-                         const int16_t *chroma, ptrdiff_t chroma_stride,
-                         uint16_t *dsty, ptrdiff_t ystride,
-                         uint16_t *dstu, ptrdiff_t ustride,
-                         uint16_t *dstv, ptrdiff_t vstride)
+static void pal_decode_field(const comp_decode_t *d, int frame, int field,
+                             const uint16_t *comp, ptrdiff_t comp_stride,
+                             const int16_t *chroma, ptrdiff_t chroma_stride,
+                             uint16_t *dsty, ptrdiff_t ystride,
+                             uint16_t *dstu, ptrdiff_t ustride,
+                             uint16_t *dstv, ptrdiff_t vstride)
 {
     const int w = d->width;
     const int rows = d->height / 2;
@@ -235,14 +275,129 @@ static void decode_field(const comp_decode_t *d, int frame, int field,
             const int32_t yl = (int32_t)comp_row[x] - in0[x];
 
             /* invert the encoder's level mappings */
-            outy[x] = clamp_u16(4096 + rdiv((int64_t)(yl - 16384) * 73, 49));
-            outu[x] = clamp_u16(32768 + rdiv((int64_t)ul * 512, 293));
-            outv[x] = clamp_u16(32768 + rdiv((int64_t)vl * 32768, 26449));
+            outy[x] = clamp_u16(4096 + rdiv((int64_t)(yl - d->level_black) * d->luma_num, d->luma_den));
+            outu[x] = clamp_u16(32768 + rdiv((int64_t)ul * 32768, d->ku));
+            outv[x] = clamp_u16(32768 + rdiv((int64_t)vl * 32768, d->kv));
         }
     }
 }
 
-void comp_decode_frame(comp_decode_t *d, int frame,
+/* NTSC 2D line comb (comb.cpp split1D/split2D): a gentle 1D bandpass
+ * centred on fsc, then a 3-line adaptive comb blending the differences
+ * against the lines ±2 frame rows away (the same field's neighbouring
+ * lines, 180 degrees out of chroma phase), weighted by similarity. */
+static void ntsc_comb(const comp_decode_t *d, int rows,
+                      const uint16_t *comp, ptrdiff_t comp_stride,
+                      float *c1, int16_t *chroma)
+{
+    const int w = d->width;
+    const float krange = (float)d->comb_krange;
+
+    /* 1D bandpass [-0.25, 0, 0.5, 0, -0.25] centred on fsc */
+    for (int r = 0; r < rows; r++) {
+        const uint16_t *line = comp + r * comp_stride;
+        float *out = c1 + r * w;
+        out[0] = out[1] = out[w - 2] = out[w - 1] = 0.0f;
+        for (int x = 2; x < w - 2; x++)
+            out[x] = (2.0f * line[x] - line[x - 2] - line[x + 2]) / 4.0f;
+    }
+
+    for (int r = 0; r < rows; r++) {
+        const float *cur = c1 + r * w;
+        const float *prev = r - 2 >= 0   ? c1 + (r - 2) * w : zero_line_f;
+        const float *next = r + 2 < rows ? c1 + (r + 2) * w : zero_line_f;
+        int16_t *out = chroma + r * w;
+
+        out[0] = 0;
+        for (int x = 1; x < w; x++) {
+            float kp, kn;
+
+            kp  = fabsf(fabsf(cur[x]) - fabsf(prev[x]));
+            kp += fabsf(fabsf(cur[x - 1]) - fabsf(prev[x - 1]));
+            kp -= (fabsf(cur[x]) + fabsf(prev[x - 1])) * 0.10f;
+            kn  = fabsf(fabsf(cur[x]) - fabsf(next[x]));
+            kn += fabsf(fabsf(cur[x - 1]) - fabsf(next[x - 1]));
+            kn -= (fabsf(cur[x]) + fabsf(next[x - 1])) * 0.10f;
+
+            kp = 1.0f - kp / krange;
+            kp = kp < 0.0f ? 0.0f : kp > 1.0f ? 1.0f : kp;
+            kn = 1.0f - kn / krange;
+            kn = kn < 0.0f ? 0.0f : kn > 1.0f ? 1.0f : kn;
+
+            float sc = 1.0f;
+            if (kn > 0.0f || kp > 0.0f) {
+                if (kn > 3.0f * kp)
+                    kp = 0.0f;
+                else if (kp > 3.0f * kn)
+                    kn = 0.0f;
+                sc = 2.0f / (kn + kp);
+                if (sc < 1.0f)
+                    sc = 1.0f;
+            } else if (fabsf(fabsf(prev[x]) - fabsf(next[x]))
+                       - fabsf((next[x] + prev[x]) * 0.2f) <= 0.0f) {
+                kn = kp = 1.0f;
+            }
+
+            const float tc = ((cur[x] - prev[x]) * kp * sc
+                            + (cur[x] - next[x]) * kn * sc) / 4.0f;
+            out[x] = clamp_i16(lrintf(tc));
+        }
+    }
+}
+
+/* Demodulate one NTSC line: product demod against the trivial 4xfsc
+ * carriers, the reference's colour low-pass, rotation onto U/V, and
+ * luma as composite minus the resynthesised filtered chroma. */
+static void ntsc_demod_line(const comp_decode_t *d, int frame, int raster_row,
+                            const uint16_t *comp_row, const int16_t *chroma_row,
+                            uint16_t *outy, uint16_t *outu, uint16_t *outv)
+{
+    const int w = d->width;
+    const int half = COLORLP_TAPS / 2;
+    int32_t m[COMP_ACTIVE_WIDTH_NTSC + COLORLP_TAPS];
+    int32_t n[COMP_ACTIVE_WIDTH_NTSC + COLORLP_TAPS];
+
+    memset(m, 0, sizeof(m));
+    memset(n, 0, sizeof(n));
+    for (int x = 0; x < w; x++) {
+        const int32_t sn = (x & 3) == 1 ? 1 : (x & 3) == 3 ? -1 : 0;
+        const int32_t cs = (x & 3) == 0 ? 1 : (x & 3) == 2 ? -1 : 0;
+        m[half + x] = chroma_row[x] * sn;
+        n[half + x] = chroma_row[x] * cs;
+    }
+
+    const comp_sc_line_t sc = comp_sc_line(d->standard, frame, raster_row);
+    const int32_t sn0 = d->sin_q15[sc.phase];
+    const int32_t cs0 = d->sin_q15[(sc.phase + d->den / 4) % d->den];
+    const int32_t bp = -cs0;
+    const int32_t bq = -sn0;
+    const int32_t s4[4] = { sn0, cs0, -sn0, -cs0 };
+    const int32_t c4[4] = { cs0, -sn0, -cs0, sn0 };
+
+    for (int x = 0; x < w; x++) {
+        int64_t p = 0, q = 0;
+        for (int j = 0; j < COLORLP_TAPS; j++) {
+            p += (int64_t)colorlp_q15[j] * m[x + j];
+            q += (int64_t)colorlp_q15[j] * n[x + j];
+        }
+        const int32_t p0 = (int32_t)((p + 16384) >> 15);
+        const int32_t q0 = (int32_t)((q + 16384) >> 15);
+
+        const int32_t ul = (int32_t)(-((int64_t)p0 * bp + (int64_t)q0 * bq + 8192) >> 14);
+        const int32_t vl = (int32_t)(-((int64_t)q0 * bp - (int64_t)p0 * bq + 8192) >> 14);
+
+        /* comb.cpp adjustY: subtract the filtered chroma, resynthesised
+         * on the carrier, rather than the raw comb output */
+        const int32_t re = (ul * s4[x & 3] + vl * c4[x & 3] + 16384) >> 15;
+        const int32_t yl = (int32_t)comp_row[x] - re;
+
+        outy[x] = clamp_u16(4096 + rdiv((int64_t)(yl - d->level_black) * d->luma_num, d->luma_den));
+        outu[x] = clamp_u16(32768 + rdiv((int64_t)ul * 32768, d->ku));
+        outv[x] = clamp_u16(32768 + rdiv((int64_t)vl * 32768, d->kv));
+    }
+}
+
+void comp_decode_frame(comp_decode_t *d, int frame, int rows, int row_off,
                        const uint16_t *comp, ptrdiff_t comp_stride,
                        uint16_t *dsty, ptrdiff_t ystride,
                        uint16_t *dstu, ptrdiff_t ustride,
@@ -250,27 +405,37 @@ void comp_decode_frame(comp_decode_t *d, int frame,
 {
     comp_decode_scratch_t *s = scratch_acquire(d);
     const int w = d->width;
-    const int rows = d->height / 2;
 
-    /* chroma separation per field; field views interleave frame rows */
-    for (int field = 0; field < 2; field++) {
-        comp_transform2d_field(&d->transform,
-                               comp + field * comp_stride, 2 * comp_stride,
-                               w, rows,
-                               s->chroma_f + field * w, 2 * w);
-    }
+    if (d->standard == COMP_STD_PAL) {
+        const int frows = rows / 2;
 
-    /* quantise the separated chroma once for the fixed-point demod */
-    for (int i = 0; i < w * d->height; i++) {
-        const long v = lrintf(s->chroma_f[i]);
-        s->chroma[i] = (int16_t)(v < -32768 ? -32768 : v > 32767 ? 32767 : v);
-    }
+        /* chroma separation per field; field views interleave rows */
+        for (int field = 0; field < 2; field++) {
+            comp_transform2d_field(&d->transform,
+                                   comp + field * comp_stride, 2 * comp_stride,
+                                   w, frows,
+                                   s->chroma_f + field * w, 2 * w);
+        }
 
-    for (int field = 0; field < 2; field++) {
-        decode_field(d, frame, field,
-                     comp + field * comp_stride, 2 * comp_stride,
-                     s->chroma + field * w, 2 * w,
-                     dsty, ystride, dstu, ustride, dstv, vstride);
+        /* quantise the separated chroma once for the fixed-point demod */
+        for (int i = 0; i < w * rows; i++)
+            s->chroma[i] = clamp_i16(lrintf(s->chroma_f[i]));
+
+        for (int field = 0; field < 2; field++) {
+            pal_decode_field(d, frame, field,
+                             comp + field * comp_stride, 2 * comp_stride,
+                             s->chroma + field * w, 2 * w,
+                             dsty, ystride, dstu, ustride, dstv, vstride);
+        }
+    } else {
+        /* the comb works on frame rows directly: ±2 rows are the same
+         * field's neighbouring lines */
+        ntsc_comb(d, rows, comp, comp_stride, s->chroma_f, s->chroma);
+        for (int r = 0; r < rows; r++)
+            ntsc_demod_line(d, frame, r + row_off,
+                            comp + r * comp_stride, s->chroma + r * w,
+                            dsty + r * ystride, dstu + r * ustride,
+                            dstv + r * vstride);
     }
 
     scratch_release(d, s);

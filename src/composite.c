@@ -78,7 +78,7 @@ static const VSFrame *VS_CC comp_decode_get_frame(int n, int activation_reason, 
     const VSFrame *src = vsapi->getFrameFilter(n, f->node, frame_ctx);
     VSFrame *dst = vsapi->newVideoFrame(&f->vi.format, f->vi.width, f->vi.height, src, core);
 
-    comp_decode_frame(f->dec, n,
+    comp_decode_frame(f->dec, n, f->vi.height, 0,
                       (const uint16_t *)vsapi->getReadPtr(src, 0), vsapi->getStride(src, 0) / 2,
                       (uint16_t *)vsapi->getWritePtr(dst, 0), vsapi->getStride(dst, 0) / 2,
                       (uint16_t *)vsapi->getWritePtr(dst, 1), vsapi->getStride(dst, 1) / 2,
@@ -234,7 +234,7 @@ static void VS_CC comp_decode_create(const VSMap *in, VSMap *out, void *user_dat
     if (!d.dec)
         RETERROR("out of memory");
     if (comp_decode_init(d.dec, d.standard, threshold,
-                         info.numThreads < 1 ? 1 : info.numThreads)) {
+                         info.numThreads < 1 ? 1 : info.numThreads, 0)) {
         free(d.dec);
         d.dec = NULL;
         RETERROR("decoder initialisation failed");
