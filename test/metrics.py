@@ -286,6 +286,11 @@ def main():
                                                        standard=standard, refine=rn))
                 print(fmt(f'Restore r={rn}', score(rest, clean)))
 
+            recomp_pc = core.composite.Encode(clip_from(degraded), standard=standard,
+                                              precomb=1)
+            nr_pc = to_array(core.composite.Decode(recomp_pc, standard=standard))
+            print(fmt('NR 2D precomb', score(nr_pc, clean)))
+
             transparent = to_array(core.composite.Decode(
                 core.composite.Encode(clean_clip, standard=standard), standard=standard))
             print(fmt('transparency 2D', score(transparent, clean)))
