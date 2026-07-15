@@ -116,7 +116,7 @@ static const VSFrame *VS_CC comp_decode_get_frame(int n, int activation_reason, 
     const VSFrame *src = srcs[look];
     VSFrame *dst = vsapi->newVideoFrame(&f->vi.format, f->vi.width, f->vi.height, src, core);
 
-    comp_decode_frame(f->dec, n, f->vi.height, comp_row_offset(f, src, vsapi),
+    comp_decode_frame(f->dec, n, f->in_frames, f->vi.height, comp_row_offset(f, src, vsapi),
                       views, view_frames, look,
                       (uint16_t *)vsapi->getWritePtr(dst, 0), vsapi->getStride(dst, 0) / 2,
                       (uint16_t *)vsapi->getWritePtr(dst, 1), vsapi->getStride(dst, 1) / 2,

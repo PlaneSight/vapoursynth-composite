@@ -153,6 +153,8 @@ void comp_transform3d_frame(const comp_transform3d_t *t,
                     const int g = tz + z;
                     const comp_field_view_t *fv =
                         (g >= z0 && g < z0 + nfields) ? &fields[g - z0] : NULL;
+                    if (fv && !fv->data)
+                        fv = NULL;
                     for (int y = 0; y < YTILE; y++) {
                         const int fl = tile_y + y;
                         const int usable = fv && y >= start_y && y < end_y

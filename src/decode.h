@@ -65,9 +65,12 @@ int comp_decode_look(const comp_decode_t *d);
  * levels) into YUV444P16; strides are in samples. rows is the frame's
  * height and row_off its position in the raster: a 480-line NTSC frame
  * occupies raster rows row_off..row_off+479.
- * views[]/view_frames[] hold 2*look+1 composite frames centred on
- * `frame`, clip edges clamped (with the clamped frame numbers). */
-void comp_decode_frame(comp_decode_t *d, int frame, int rows, int row_off,
+ * views[]/view_frames[] hold 2*look+1 composite frames centered on
+ * `frame`, clip edges clamped (with the clamped frame numbers); nframes
+ * is the clip length, so out-of-clip fields become black as in the
+ * reference implementation. */
+void comp_decode_frame(comp_decode_t *d, int frame, int nframes,
+                       int rows, int row_off,
                        const comp_frame_view_t *views, const int *view_frames,
                        int look,
                        uint16_t *dsty, ptrdiff_t ystride,

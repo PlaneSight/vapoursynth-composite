@@ -80,7 +80,7 @@ static void test_ntsc_roundtrip(int setup, int rows, int row_off)
         {
             const comp_frame_view_t v = { ncomp[0], w };
             const int vf = frame;
-            comp_decode_frame(&dec, frame, rows, row_off, &v, &vf, 0,
+            comp_decode_frame(&dec, frame, 2, rows, row_off, &v, &vf, 0,
                               nouty[0], w, noutu[0], w, noutv[0], w);
         }
 
@@ -152,7 +152,9 @@ static void test_3d_roundtrip(int standard)
                              comp_sc_line(standard, frame, r));
 
     int32_t max_y = 0, max_u = 0, max_v = 0;
-    for (int frame = 3; frame <= 4; frame++) {
+    int32_t edge_y = 0, edge_u = 0, edge_v = 0;
+    for (int frame = 0; frame < nframes; frame++) {
+        const int edge = frame < look || frame >= nframes - look;
         comp_frame_view_t views[2 * COMP_T3D_LOOK + 1];
         int view_frames[2 * COMP_T3D_LOOK + 1];
         for (int i = 0; i <= 2 * look; i++) {
@@ -162,7 +164,7 @@ static void test_3d_roundtrip(int standard)
             views[i].stride = COMP_ACTIVE_WIDTH_PAL;
             view_frames[i] = k;
         }
-        comp_decode_frame(&dec, frame, rows, 0, views, view_frames, look,
+        comp_decode_frame(&dec, frame, nframes, rows, 0, views, view_frames, look,
                           outy[0], COMP_ACTIVE_WIDTH_PAL,
                           outu[0], COMP_ACTIVE_WIDTH_PAL,
                           outv[0], COMP_ACTIVE_WIDTH_PAL);
@@ -180,18 +182,24 @@ static void test_3d_roundtrip(int standard)
                 const int32_t dy = abs((int)outy[r][x] - (int)srcy[r][x]);
                 const int32_t du = abs((int)outu[r][x] - (int)srcu[r][x]);
                 const int32_t dv = abs((int)outv[r][x] - (int)srcv[r][x]);
-                if (dy > max_y) max_y = dy;
-                if (du > max_u) max_u = du;
-                if (dv > max_v) max_v = dv;
+                int32_t *py = edge ? &edge_y : &max_y;
+                int32_t *pu = edge ? &edge_u : &max_u;
+                int32_t *pv = edge ? &edge_v : &max_v;
+                if (dy > *py) *py = dy;
+                if (du > *pu) *pu = du;
+                if (dv > *pv) *pv = dv;
             }
         }
     }
 
-    printf("test_decode: %s 3d max diff Y %d U %d V %d (16-bit)\n",
-           pal ? "pal" : "ntsc", max_y, max_u, max_v);
+    printf("test_decode: %s 3d max diff Y %d U %d V %d, edge frames Y %d U %d V %d\n",
+           pal ? "pal" : "ntsc", max_y, max_u, max_v, edge_y, edge_u, edge_v);
     CHECK(max_y <= 64, "3d Y round-trip error %d too large", max_y);
     CHECK(max_u <= 128, "3d U round-trip error %d too large", max_u);
     CHECK(max_v <= 128, "3d V round-trip error %d too large", max_v);
+    CHECK(edge_y <= 512, "3d edge Y error %d too large", edge_y);
+    CHECK(edge_u <= 2048, "3d edge U error %d too large", edge_u);
+    CHECK(edge_v <= 2048, "3d edge V error %d too large", edge_v);
 
     comp_decode_free(&dec);
 }
@@ -229,7 +237,7 @@ int main(void)
         {
             const comp_frame_view_t v = { comp[0], W };
             const int vf = frame;
-            comp_decode_frame(&dec, frame, H, 0, &v, &vf, 0,
+            comp_decode_frame(&dec, frame, 4, H, 0, &v, &vf, 0,
                               outy[0], W, outu[0], W, outv[0], W);
         }
 

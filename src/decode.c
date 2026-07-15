@@ -528,7 +528,8 @@ static void ntsc_demod_line(const comp_decode_t *d, int frame, int raster_row,
     }
 }
 
-void comp_decode_frame(comp_decode_t *d, int frame, int rows, int row_off,
+void comp_decode_frame(comp_decode_t *d, int frame, int nframes,
+                       int rows, int row_off,
                        const comp_frame_view_t *views, const int *view_frames,
                        int look,
                        uint16_t *dsty, ptrdiff_t ystride,
@@ -563,7 +564,15 @@ void comp_decode_frame(comp_decode_t *d, int frame, int rows, int row_off,
 
             for (int i = 0; i < nfields; i++) {
                 const int g = z0 + i;
-                int k = (g >= 0 ? g / 2 : 0) - (frame - look);
+                if (g < 0 || g >= 2 * nframes) {
+                    /* outside the clip: black, as the reference pads --
+                     * repeating real fields would break the temporal
+                     * phase sequence the symmetry test relies on */
+                    fields[i].data = NULL;
+                    fields[i].stride = 0;
+                    continue;
+                }
+                int k = g / 2 - (frame - look);
                 k = k < 0 ? 0 : k > 2 * look ? 2 * look : k;
                 fields[i].data = views[k].data + (g & 1) * views[k].stride;
                 fields[i].stride = 2 * views[k].stride;
