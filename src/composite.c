@@ -23,6 +23,7 @@ struct comp_filter_t {
     VSNode *node;
     VSVideoInfo vi;
     int standard;
+    int in_frames;
     comp_encode_t enc;
     comp_decode_t *dec;
 };
@@ -78,30 +79,51 @@ static const VSFrame *VS_CC comp_encode_get_frame(int n, int activation_reason, 
     return dst;
 }
 
+#define COMP_MAX_LOOK COMP_T3D_LOOK
+
 static const VSFrame *VS_CC comp_decode_get_frame(int n, int activation_reason, void *instance_data,
                                                   void **frame_data, VSFrameContext *frame_ctx,
                                                   VSCore *core, const VSAPI *vsapi)
 {
     comp_filter_t *f = instance_data;
+    const int look = comp_decode_look(f->dec);
+    const int last = f->in_frames - 1;
     (void)frame_data;
 
     if (activation_reason == arInitial) {
-        vsapi->requestFrameFilter(n, f->node, frame_ctx);
+        int prev = -1;
+        for (int i = -look; i <= look; i++) {
+            const int k = VSMIN(VSMAX(n + i, 0), last);
+            if (k != prev)
+                vsapi->requestFrameFilter(k, f->node, frame_ctx);
+            prev = k;
+        }
         return NULL;
     }
     if (activation_reason != arAllFramesReady)
         return NULL;
 
-    const VSFrame *src = vsapi->getFrameFilter(n, f->node, frame_ctx);
+    const VSFrame *srcs[2 * COMP_MAX_LOOK + 1];
+    comp_frame_view_t views[2 * COMP_MAX_LOOK + 1];
+    int view_frames[2 * COMP_MAX_LOOK + 1];
+    for (int i = 0; i <= 2 * look; i++) {
+        const int k = VSMIN(VSMAX(n - look + i, 0), last);
+        srcs[i] = vsapi->getFrameFilter(k, f->node, frame_ctx);
+        views[i].data = (const uint16_t *)vsapi->getReadPtr(srcs[i], 0);
+        views[i].stride = vsapi->getStride(srcs[i], 0) / 2;
+        view_frames[i] = k;
+    }
+    const VSFrame *src = srcs[look];
     VSFrame *dst = vsapi->newVideoFrame(&f->vi.format, f->vi.width, f->vi.height, src, core);
 
     comp_decode_frame(f->dec, n, f->vi.height, comp_row_offset(f, src, vsapi),
-                      (const uint16_t *)vsapi->getReadPtr(src, 0), vsapi->getStride(src, 0) / 2,
+                      views, view_frames, look,
                       (uint16_t *)vsapi->getWritePtr(dst, 0), vsapi->getStride(dst, 0) / 2,
                       (uint16_t *)vsapi->getWritePtr(dst, 1), vsapi->getStride(dst, 1) / 2,
                       (uint16_t *)vsapi->getWritePtr(dst, 2), vsapi->getStride(dst, 2) / 2);
 
-    vsapi->freeFrame(src);
+    for (int i = 0; i <= 2 * look; i++)
+        vsapi->freeFrame(srcs[i]);
     return dst;
 }
 
@@ -255,6 +277,12 @@ static void VS_CC comp_decode_create(const VSMap *in, VSMap *out, void *user_dat
 
     const int setup = !!vsapi->mapGetIntSaturated(in, "setup", 0, &err);
 
+    int dimensions = vsapi->mapGetIntSaturated(in, "dimensions", 0, &err);
+    if (err)
+        dimensions = 2;
+    if (dimensions != 2 && dimensions != 3)
+        RETERROR("dimensions must be 2 or 3");
+
     if (!vsh_isConstantVideoFormat(&d.vi))
         RETERROR("clip must have constant format and dimensions");
     if (d.vi.format.colorFamily != cfGray || d.vi.format.sampleType != stInteger
@@ -280,18 +308,19 @@ static void VS_CC comp_decode_create(const VSMap *in, VSMap *out, void *user_dat
     if (!d.dec)
         RETERROR("out of memory");
     if (comp_decode_init(d.dec, d.standard, threshold,
-                         info.numThreads < 1 ? 1 : info.numThreads, setup)) {
+                         info.numThreads < 1 ? 1 : info.numThreads, setup, dimensions)) {
         free(d.dec);
         d.dec = NULL;
         RETERROR("decoder initialisation failed");
     }
 
     vsapi->queryVideoFormat(&d.vi.format, cfYUV, stInteger, 16, 0, 0, core);
+    d.in_frames = d.vi.numFrames;
 
     comp_filter_t *data = malloc(sizeof(*data));
     *data = d;
 
-    VSFilterDependency deps[] = {{ data->node, rpStrictSpatial }};
+    VSFilterDependency deps[] = {{ data->node, dimensions == 3 ? rpGeneral : rpStrictSpatial }};
     VSNode *dec_node = vsapi->createVideoFilter2(name, &data->vi, comp_decode_get_frame, comp_free,
                                                  fmParallel, deps, 1, data, core);
     if (!dec_node) {
@@ -345,7 +374,8 @@ VS_EXTERNAL_API(void) VapourSynthPluginInit2(VSPlugin *plugin, const VSPLUGINAPI
                              "standard:data:opt;"
                              "width:int:opt;"
                              "threshold:float:opt;"
-                             "setup:int:opt;",
+                             "setup:int:opt;"
+                             "dimensions:int:opt;",
                              "clip:vnode;",
                              comp_decode_create, (void *)"Decode", plugin);
 }

@@ -54,7 +54,7 @@ static void test_ntsc_roundtrip(int setup, int rows, int row_off)
     const int w = COMP_ACTIVE_WIDTH_NTSC;
 
     CHECK(comp_encode_init(&enc, COMP_STD_NTSC, setup) == 0, "ntsc encode init");
-    CHECK(comp_decode_init(&dec, COMP_STD_NTSC, 0.4, 1, setup) == 0, "ntsc decode init");
+    CHECK(comp_decode_init(&dec, COMP_STD_NTSC, 0.4, 1, setup, 2) == 0, "ntsc decode init");
 
     for (int r = 0; r < rows; r++) {
         for (int x = 0; x < w; x++) {
@@ -77,8 +77,12 @@ static void test_ntsc_roundtrip(int setup, int rows, int row_off)
             comp_encode_line(&enc, ncomp[r], nsrcy[r], nsrcu[r], nsrcv[r],
                              comp_sc_line(COMP_STD_NTSC, frame, r + row_off));
 
-        comp_decode_frame(&dec, frame, rows, row_off, ncomp[0], w,
-                          nouty[0], w, noutu[0], w, noutv[0], w);
+        {
+            const comp_frame_view_t v = { ncomp[0], w };
+            const int vf = frame;
+            comp_decode_frame(&dec, frame, rows, row_off, &v, &vf, 0,
+                              nouty[0], w, noutu[0], w, noutv[0], w);
+        }
 
         for (int r = 12; r < rows - 12; r++) {
             if (r >= rows / 2 - 12 && r < rows / 2 + 12)
@@ -109,13 +113,96 @@ static void test_ntsc_roundtrip(int setup, int rows, int row_off)
     comp_decode_free(&dec);
 }
 
+
+/* 3D round trips on static content: every decoded frame draws on its
+ * temporal neighbors, so encode a run of frames and decode the middle */
+static uint16_t rt_comp[8][COMP_ACTIVE_HEIGHT_PAL][COMP_ACTIVE_WIDTH_PAL];
+
+static void test_3d_roundtrip(int standard)
+{
+    const int pal = standard == COMP_STD_PAL;
+    const int w = pal ? COMP_ACTIVE_WIDTH_PAL : COMP_ACTIVE_WIDTH_NTSC;
+    const int rows = pal ? COMP_ACTIVE_HEIGHT_PAL : COMP_ACTIVE_HEIGHT_NTSC;
+    const int nframes = 8;
+    comp_encode_t enc;
+    comp_decode_t dec;
+
+    CHECK(comp_encode_init(&enc, standard, 0) == 0, "3d encode init");
+    CHECK(comp_decode_init(&dec, standard, 0.4, 1, 0, 3) == 0, "3d decode init");
+    const int look = comp_decode_look(&dec);
+    CHECK(look == (pal ? 3 : 1), "3d look");
+
+    for (int r = 0; r < rows; r++) {
+        for (int x = 0; x < w; x++) {
+            if (r < rows / 2) {
+                const int bar = x * 8 / w;
+                srcy[r][x] = bars[bar][0];
+                srcu[r][x] = bars[bar][1];
+                srcv[r][x] = bars[bar][2];
+            } else {
+                srcy[r][x] = (uint16_t)(24000 + 16000.0 * sin(x * 0.008));
+                srcu[r][x] = (uint16_t)(32768 + 9000.0 * sin(x * 0.004));
+                srcv[r][x] = (uint16_t)(32768 + 7000.0 * cos(x * 0.003));
+            }
+        }
+    }
+    for (int frame = 0; frame < nframes; frame++)
+        for (int r = 0; r < rows; r++)
+            comp_encode_line(&enc, &rt_comp[frame][r][0], srcy[r], srcu[r], srcv[r],
+                             comp_sc_line(standard, frame, r));
+
+    int32_t max_y = 0, max_u = 0, max_v = 0;
+    for (int frame = 3; frame <= 4; frame++) {
+        comp_frame_view_t views[2 * COMP_T3D_LOOK + 1];
+        int view_frames[2 * COMP_T3D_LOOK + 1];
+        for (int i = 0; i <= 2 * look; i++) {
+            int k = frame - look + i;
+            k = k < 0 ? 0 : k >= nframes ? nframes - 1 : k;
+            views[i].data = &rt_comp[k][0][0];
+            views[i].stride = COMP_ACTIVE_WIDTH_PAL;
+            view_frames[i] = k;
+        }
+        comp_decode_frame(&dec, frame, rows, 0, views, view_frames, look,
+                          outy[0], COMP_ACTIVE_WIDTH_PAL,
+                          outu[0], COMP_ACTIVE_WIDTH_PAL,
+                          outv[0], COMP_ACTIVE_WIDTH_PAL);
+
+        for (int r = 32; r < rows - 32; r++) {
+            if (r >= rows / 2 - 40 && r < rows / 2 + 40)
+                continue;
+            for (int x = 48; x < w - 48; x++) {
+                if (r < rows / 2) {
+                    const int bar = x * 8 / w;
+                    const int lo = bar * w / 8, hi = (bar + 1) * w / 8;
+                    if (x - lo < 48 || hi - x <= 48)
+                        continue;
+                }
+                const int32_t dy = abs((int)outy[r][x] - (int)srcy[r][x]);
+                const int32_t du = abs((int)outu[r][x] - (int)srcu[r][x]);
+                const int32_t dv = abs((int)outv[r][x] - (int)srcv[r][x]);
+                if (dy > max_y) max_y = dy;
+                if (du > max_u) max_u = du;
+                if (dv > max_v) max_v = dv;
+            }
+        }
+    }
+
+    printf("test_decode: %s 3d max diff Y %d U %d V %d (16-bit)\n",
+           pal ? "pal" : "ntsc", max_y, max_u, max_v);
+    CHECK(max_y <= 64, "3d Y round-trip error %d too large", max_y);
+    CHECK(max_u <= 128, "3d U round-trip error %d too large", max_u);
+    CHECK(max_v <= 128, "3d V round-trip error %d too large", max_v);
+
+    comp_decode_free(&dec);
+}
+
 int main(void)
 {
     comp_encode_t enc;
     comp_decode_t dec;
 
     CHECK(comp_encode_init(&enc, COMP_STD_PAL, 0) == 0, "encode init");
-    CHECK(comp_decode_init(&dec, COMP_STD_PAL, 0.4, 2, 0) == 0, "decode init");
+    CHECK(comp_decode_init(&dec, COMP_STD_PAL, 0.4, 2, 0, 2) == 0, "decode init");
 
     /* top half: color bars; bottom half: smooth chroma gradients */
     for (int r = 0; r < H; r++) {
@@ -139,8 +226,12 @@ int main(void)
             comp_encode_line(&enc, comp[r], srcy[r], srcu[r], srcv[r],
                              comp_sc_line(COMP_STD_PAL, frame, r));
 
-        comp_decode_frame(&dec, frame, H, 0, comp[0], W,
-                          outy[0], W, outu[0], W, outv[0], W);
+        {
+            const comp_frame_view_t v = { comp[0], W };
+            const int vf = frame;
+            comp_decode_frame(&dec, frame, H, 0, &v, &vf, 0,
+                              outy[0], W, outu[0], W, outv[0], W);
+        }
 
         /* measure away from transitions: the chroma low-passes smear
          * sharp edges by design, and a transform tile is 32 samples by
@@ -177,6 +268,9 @@ int main(void)
     test_ntsc_roundtrip(1, 486, 0);
     test_ntsc_roundtrip(0, 480, 4);
     test_ntsc_roundtrip(0, 480, 5);
+
+    test_3d_roundtrip(COMP_STD_PAL);
+    test_3d_roundtrip(COMP_STD_NTSC);
 
     if (!fail)
         printf("test_decode: all tests passed\n");

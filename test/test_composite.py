@@ -145,4 +145,30 @@ except vs.Error as e:
 else:
     assert False, 'wrong ntsc composite size accepted'
 
+
+# ---- 3D decoders: round trip both standards, static content
+pal_src = flat([32128, 40960, 28672], length=9)
+dec3 = core.composite.Decode(core.composite.Encode(pal_src), dimensions=3)
+fr = dec3.get_frame(4)
+for pl, want in enumerate((32128, 40960, 28672)):
+    vals = [fr[pl][r, x] for r in (40, 288, 535) for x in range(64, 656, 8)]
+    worst = max(abs(v - want) for v in vals)
+    assert worst <= 64, ('pal3d', pl, want, worst)
+
+dec3n = core.composite.Decode(core.composite.Encode(bff, standard='ntsc'),
+                              standard='ntsc', dimensions=3)
+fr = dec3n.get_frame(1)
+for pl, want in enumerate((32128, 40960, 28672)):
+    vals = [fr[pl][r, x] for r in (30, 240, 445) for x in range(64, 656, 8)]
+    worst = max(abs(v - want) for v in vals)
+    assert worst <= 96, ('ntsc3d', pl, want, worst)
+
+try:
+    core.composite.Decode(core.std.BlankClip(format=vs.GRAY16, width=928, height=576),
+                          dimensions=4)
+except vs.Error as e:
+    assert 'dimensions' in str(e)
+else:
+    assert False, 'dimensions=4 accepted'
+
 print('test_composite: all tests passed')

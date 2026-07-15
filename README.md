@@ -20,11 +20,13 @@ Alpha. PAL and NTSC round trips work:
   `setup` adds the 7.5 IRE pedestal). A 480-line NTSC clip occupies the
   486-line BFF raster per its `_FieldBased` frame prop: BFF/DV at rows
   4..483, TFF/RP 202 at rows 5..484.
-- `composite.Decode(clip[, standard, width, threshold, setup])` —
-  composite back to YUV444P16, resampled to `width` (default 720). PAL
-  uses 2D Transform PAL chroma separation with PALcolour-style
-  demodulation (`threshold` is the transform's bin-symmetry ratio);
-  NTSC uses a 2D adaptive line comb.
+- `composite.Decode(clip[, standard, width, threshold, setup, dimensions])`
+  — composite back to YUV444P16, resampled to `width` (default 720). PAL
+  uses Transform PAL chroma separation with PALcolour-style demodulation
+  (`threshold` is the transform's bin-symmetry ratio); NTSC uses an
+  adaptive line comb. `dimensions=3` selects the spatio-temporal
+  variants (3D Transform PAL / adaptive 3D comb), which draw on
+  neighbouring frames.
 
 ## Building
 

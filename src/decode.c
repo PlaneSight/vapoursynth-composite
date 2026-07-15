@@ -44,11 +44,11 @@ static const int16_t colorlp_q15[COLORLP_TAPS] = {
 };
 
 int comp_decode_init(comp_decode_t *d, int standard, double threshold,
-                     int nscratch, int setup)
+                     int nscratch, int setup, int dimensions)
 {
     comp_encode_t enc;
 
-    if (nscratch < 1)
+    if (nscratch < 1 || (dimensions != 2 && dimensions != 3))
         return -1;
 
     memset(d, 0, sizeof(*d));
@@ -57,6 +57,7 @@ int comp_decode_init(comp_decode_t *d, int standard, double threshold,
     if (comp_encode_init(&enc, standard, setup))
         return -1;
     d->standard = standard;
+    d->dimensions = dimensions;
     d->width = enc.width;
     d->height = standard == COMP_STD_PAL ? COMP_ACTIVE_HEIGHT_PAL
                                          : COMP_ACTIVE_HEIGHT_NTSC;
@@ -96,7 +97,8 @@ int comp_decode_init(comp_decode_t *d, int standard, double threshold,
             for (int k = 0; k < 4; k++)
                 d->cfilt_q16[f][k] = (int32_t)lrint(cfilt[f][k] / cdiv * 65536.0);
 
-        if (comp_transform2d_init(&d->transform, threshold))
+        if (dimensions == 2 ? comp_transform2d_init(&d->transform, threshold)
+                            : comp_transform3d_init(&d->transform3, threshold))
             return -1;
     } else {
         /* the comb's adaptivity range: 45 IRE of the encoded span */
@@ -116,6 +118,14 @@ int comp_decode_init(comp_decode_t *d, int standard, double threshold,
             comp_decode_free(d);
             return -1;
         }
+        if (standard == COMP_STD_NTSC) {
+            d->scratch[i].tmp3 = malloc(sizeof(float) * d->width * d->height
+                                        * (dimensions == 3 ? 6 : 1));
+            if (!d->scratch[i].tmp3) {
+                comp_decode_free(d);
+                return -1;
+            }
+        }
     }
     pthread_mutex_init(&d->lock, NULL);
     pthread_cond_init(&d->cond, NULL);
@@ -128,14 +138,26 @@ void comp_decode_free(comp_decode_t *d)
         for (int i = 0; i < d->nscratch; i++) {
             free(d->scratch[i].chroma_f);
             free(d->scratch[i].chroma);
+            free(d->scratch[i].tmp3);
         }
         free(d->scratch);
         d->scratch = NULL;
         pthread_mutex_destroy(&d->lock);
         pthread_cond_destroy(&d->cond);
     }
-    if (d->standard == COMP_STD_PAL)
-        comp_transform2d_free(&d->transform);
+    if (d->standard == COMP_STD_PAL) {
+        if (d->dimensions == 2)
+            comp_transform2d_free(&d->transform);
+        else
+            comp_transform3d_free(&d->transform3);
+    }
+}
+
+int comp_decode_look(const comp_decode_t *d)
+{
+    if (d->dimensions == 2)
+        return 0;
+    return d->standard == COMP_STD_PAL ? COMP_T3D_LOOK : 1;
 }
 
 static comp_decode_scratch_t *scratch_acquire(comp_decode_t *d)
@@ -282,18 +304,13 @@ static void pal_decode_field(const comp_decode_t *d, int frame, int field,
     }
 }
 
-/* NTSC 2D line comb (comb.cpp split1D/split2D): a gentle 1D bandpass
- * centred on fsc, then a 3-line adaptive comb blending the differences
- * against the lines ±2 frame rows away (the same field's neighbouring
- * lines, 180 degrees out of chroma phase), weighted by similarity. */
-static void ntsc_comb(const comp_decode_t *d, int rows,
-                      const uint16_t *comp, ptrdiff_t comp_stride,
-                      float *c1, int16_t *chroma)
+/* NTSC 1D bandpass [-0.25, 0, 0.5, 0, -0.25] centered on fsc
+ * (comb.cpp split1D) */
+static void ntsc_comb1d(const comp_decode_t *d, int rows,
+                        const uint16_t *comp, ptrdiff_t comp_stride, float *c1)
 {
     const int w = d->width;
-    const float krange = (float)d->comb_krange;
 
-    /* 1D bandpass [-0.25, 0, 0.5, 0, -0.25] centred on fsc */
     for (int r = 0; r < rows; r++) {
         const uint16_t *line = comp + r * comp_stride;
         float *out = c1 + r * w;
@@ -301,14 +318,24 @@ static void ntsc_comb(const comp_decode_t *d, int rows,
         for (int x = 2; x < w - 2; x++)
             out[x] = (2.0f * line[x] - line[x - 2] - line[x + 2]) / 4.0f;
     }
+}
+
+/* NTSC 3-line adaptive comb on the 1D chroma (comb.cpp split2D): blend
+ * the differences against the lines ±2 frame rows away (the same
+ * field's neighboring lines, 180 degrees out of chroma phase),
+ * weighted by similarity. */
+static void ntsc_comb2d(const comp_decode_t *d, int rows, const float *c1, float *c2)
+{
+    const int w = d->width;
+    const float krange = (float)d->comb_krange;
 
     for (int r = 0; r < rows; r++) {
         const float *cur = c1 + r * w;
         const float *prev = r - 2 >= 0   ? c1 + (r - 2) * w : zero_line_f;
         const float *next = r + 2 < rows ? c1 + (r + 2) * w : zero_line_f;
-        int16_t *out = chroma + r * w;
+        float *out = c2 + r * w;
 
-        out[0] = 0;
+        out[0] = 0.0f;
         for (int x = 1; x < w; x++) {
             float kp, kn;
 
@@ -338,8 +365,112 @@ static void ntsc_comb(const comp_decode_t *d, int rows,
                 kn = kp = 1.0f;
             }
 
-            const float tc = ((cur[x] - prev[x]) * kp * sc
-                            + (cur[x] - next[x]) * kn * sc) / 4.0f;
+            out[x] = ((cur[x] - prev[x]) * kp * sc
+                    + (cur[x] - next[x]) * kn * sc) / 4.0f;
+        }
+    }
+}
+
+
+/* line phase parity, matching the reference's getLinePhase: the NTSC
+ * subcarrier advances half a cycle per broadcast line, so the parity of
+ * the line count within the color sequence selects one of the two
+ * phase classes */
+static int ntsc_line_phase(int frame, int raster_row)
+{
+    const int frame_line = 39 + raster_row;
+    const int field_id = ((frame % 2) * 2 + (frame_line & 1)) % 4;
+    const int prev_lines = (field_id / 2) * 525 + (field_id % 2) * 263 + frame_line / 2;
+    return prev_lines & 1;
+}
+
+/* NTSC adaptive 3D comb (comb.cpp split3D/getBestCandidate): pick the
+ * most similar sample that should be 180 degrees out of chroma phase,
+ * from this line, neighboring lines, or the neighboring fields and
+ * frames, and comb against it; if a same-frame candidate wins, reuse
+ * the 2D result. Buffers are indexed 0/1/2 = previous/current/next. */
+static void ntsc_split3d(const comp_decode_t *d, int rows, int row_off,
+                         const comp_frame_view_t *views, const int *view_frames,
+                         const float *const c1[3], const float *const c2[3],
+                         int16_t *chroma)
+{
+    const int w = d->width;
+    const double irescale = d->comb_krange / 45.0;
+    /* bias bonuses prefer frame over field over line candidates
+     * (comb.cpp adaptThreshold = 1.0, chromaWeight = 1.0) */
+    static const double LINE_BONUS = -2.0, FIELD_BONUS = -4.0, FRAME_BONUS = -6.0;
+
+    for (int r = 0; r < rows; r++) {
+        const int cur_lp = ntsc_line_phase(view_frames[1], r + row_off);
+        const float *c1c = c1[1] + r * w;
+        const float *c2c = c2[1] + r * w;
+        int16_t *out = chroma + r * w;
+
+        for (int x = 0; x < w; x++) {
+            if (x < 3 || x >= w - 3) {
+                out[x] = clamp_i16(lrintf(c2c[x]));
+                continue;
+            }
+
+            const int want = (2 + 2 * cur_lp + x) % 4;
+
+            /* candidate table: buffer, line, sample, bonus; the first
+             * four are the same-frame (1D/2D) candidates */
+            struct { int k, cr, ch; double bonus; } cand[8] = {
+                { 1, r, x - 2, 0.0 },
+                { 1, r, x + 2, 0.0 },
+                { 1, r - 2, x, LINE_BONUS },
+                { 1, r + 2, x, LINE_BONUS },
+                { 1, r - 1, x, FIELD_BONUS },
+                { 1, r + 1, x, FIELD_BONUS },
+                { 0, r, x, FRAME_BONUS },
+                { 2, r, x, FRAME_BONUS },
+            };
+            /* adjacent-field candidates come from this frame or the
+             * neighbouring one, whichever gives the matching phase */
+            if (cur_lp == ntsc_line_phase(view_frames[1], r + row_off - 1))
+                cand[4].k = 0;
+            else
+                cand[5].k = 2;
+
+            double best_penalty = 0.0;
+            float best_sample = 0.0f;
+            int best = -1;
+
+            for (int i = 0; i < 8; i++) {
+                const int k = cand[i].k, cr = cand[i].cr, ch = cand[i].ch;
+                double penalty = 1000.0;
+                float sample = 0.0f;
+
+                if (cr >= 0 && cr < rows && ch >= 1 && ch < w - 1) {
+                    sample = c1[k][cr * w + ch];
+                    const int have = (2 * ntsc_line_phase(view_frames[k], cr + row_off) + ch) % 4;
+                    if (want == have) {
+                        const uint16_t *ref_line = views[1].data + r * views[1].stride;
+                        const uint16_t *cand_line = views[k].data + cr * views[k].stride;
+                        double ypen = 0.0, iqpen = 0.0;
+                        static const double weights[3] = { 0.5, 1.0, 0.5 };
+                        for (int o = -1; o <= 1; o++) {
+                            const double ref_c = c2c[x + o];
+                            const double cand_c = c2[k][cr * w + ch + o];
+                            ypen += fabs((ref_line[x + o] - ref_c)
+                                         - (cand_line[ch + o] - cand_c));
+                            iqpen += fabs(ref_c + cand_c) * weights[o + 1];
+                        }
+                        penalty = ypen / 3.0 / irescale
+                                + (iqpen / 2.0 / irescale) * 0.28
+                                + cand[i].bonus;
+                    }
+                }
+
+                if (best < 0 || penalty < best_penalty) {
+                    best = i;
+                    best_penalty = penalty;
+                    best_sample = sample;
+                }
+            }
+
+            const float tc = best < 4 ? c2c[x] : (c1c[x] - best_sample) / 2.0f;
             out[x] = clamp_i16(lrintf(tc));
         }
     }
@@ -398,23 +529,48 @@ static void ntsc_demod_line(const comp_decode_t *d, int frame, int raster_row,
 }
 
 void comp_decode_frame(comp_decode_t *d, int frame, int rows, int row_off,
-                       const uint16_t *comp, ptrdiff_t comp_stride,
+                       const comp_frame_view_t *views, const int *view_frames,
+                       int look,
                        uint16_t *dsty, ptrdiff_t ystride,
                        uint16_t *dstu, ptrdiff_t ustride,
                        uint16_t *dstv, ptrdiff_t vstride)
 {
     comp_decode_scratch_t *s = scratch_acquire(d);
     const int w = d->width;
+    const uint16_t *comp = views[look].data;
+    const ptrdiff_t comp_stride = views[look].stride;
 
     if (d->standard == COMP_STD_PAL) {
         const int frows = rows / 2;
 
-        /* chroma separation per field; field views interleave rows */
-        for (int field = 0; field < 2; field++) {
-            comp_transform2d_field(&d->transform,
-                                   comp + field * comp_stride, 2 * comp_stride,
-                                   w, frows,
-                                   s->chroma_f + field * w, 2 * w);
+        if (d->dimensions == 2) {
+            /* chroma separation per field; field views interleave rows */
+            for (int field = 0; field < 2; field++) {
+                comp_transform2d_field(&d->transform,
+                                       comp + field * comp_stride, 2 * comp_stride,
+                                       w, frows,
+                                       s->chroma_f + field * w, 2 * w);
+            }
+        } else {
+            /* build the field stack the covering 3D tiles need; the
+             * views are edge-clamped frames, so out-of-clip fields
+             * resolve to the nearest frame's field of the same parity */
+            comp_field_view_t fields[COMP_T3D_ZTILE + COMP_T3D_ZTILE / 2];
+            const int fout = frame * 2;
+            const int tz_hi = ((fout + 1) / (COMP_T3D_ZTILE / 2)) * (COMP_T3D_ZTILE / 2);
+            const int z0 = tz_hi - COMP_T3D_ZTILE / 2;
+            const int nfields = COMP_T3D_ZTILE + COMP_T3D_ZTILE / 2;
+
+            for (int i = 0; i < nfields; i++) {
+                const int g = z0 + i;
+                int k = (g >= 0 ? g / 2 : 0) - (frame - look);
+                k = k < 0 ? 0 : k > 2 * look ? 2 * look : k;
+                fields[i].data = views[k].data + (g & 1) * views[k].stride;
+                fields[i].stride = 2 * views[k].stride;
+            }
+            comp_transform3d_frame(&d->transform3, fields, z0, nfields,
+                                   frame, w, frows,
+                                   s->chroma_f, s->chroma_f + w, 2 * w);
         }
 
         /* quantise the separated chroma once for the fixed-point demod */
@@ -430,7 +586,23 @@ void comp_decode_frame(comp_decode_t *d, int frame, int rows, int row_off,
     } else {
         /* the comb works on frame rows directly: ±2 rows are the same
          * field's neighbouring lines */
-        ntsc_comb(d, rows, comp, comp_stride, s->chroma_f, s->chroma);
+        if (d->dimensions == 2) {
+            ntsc_comb1d(d, rows, comp, comp_stride, s->chroma_f);
+            ntsc_comb2d(d, rows, s->chroma_f, s->tmp3);
+            for (int i = 0; i < w * rows; i++)
+                s->chroma[i] = clamp_i16(lrintf(s->tmp3[i]));
+        } else {
+            const float *c1[3], *c2[3];
+            for (int k = 0; k < 3; k++) {
+                float *b1 = s->tmp3 + k * w * d->height;
+                float *b2 = s->tmp3 + (3 + k) * w * d->height;
+                ntsc_comb1d(d, rows, views[k].data, views[k].stride, b1);
+                ntsc_comb2d(d, rows, b1, b2);
+                c1[k] = b1;
+                c2[k] = b2;
+            }
+            ntsc_split3d(d, rows, row_off, views, view_frames, c1, c2, s->chroma);
+        }
         for (int r = 0; r < rows; r++)
             ntsc_demod_line(d, frame, r + row_off,
                             comp + r * comp_stride, s->chroma + r * w,
