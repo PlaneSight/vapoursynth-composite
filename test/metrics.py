@@ -13,8 +13,10 @@
 #
 # usage: metrics.py path/to/composite.so [pal|ntsc|both] [frames]
 
+import os
 import subprocess
 import sys
+import tempfile
 
 import numpy as np
 import vapoursynth as vs
@@ -175,6 +177,8 @@ def crop(a):
 def score(out, ref):
     o, r = crop(out), crop(ref)
     res = {}
+    if HAVE_XPSNR:
+        res['xpsnr'] = xpsnr(out, ref)
     for p, name in enumerate('YUV'):
         mse = np.mean((o[:, p] - r[:, p]) ** 2)
         res[f'psnr_{name}'] = 10 * np.log10(65535.0 ** 2 / mse) if mse else np.inf
@@ -186,18 +190,57 @@ def score(out, ref):
 
 
 def fmt(name, res):
-    return (f"  {name:16s} PSNR Y {res['psnr_Y']:6.2f}  U {res['psnr_U']:6.2f}  "
-            f"V {res['psnr_V']:6.2f}   chromaHF {res['chf']:7.1f}  flicker {res['flick']:7.1f}")
+    s = (f"  {name:16s} PSNR Y {res['psnr_Y']:6.2f}  U {res['psnr_U']:6.2f}  "
+         f"V {res['psnr_V']:6.2f}   chromaHF {res['chf']:7.1f}  flicker {res['flick']:7.1f}")
+    x = res.get('xpsnr')
+    if x:
+        s += f"   XPSNR Y {x['y']:6.2f}  U {x['u']:6.2f}  V {x['v']:6.2f}"
+    return s
 
 # ------------------------------------------------------------------- main
 
-def xpsnr_available():
-    r = subprocess.run(['ffmpeg', '-hide_banner', '-filters'],
-                       capture_output=True, text=True)
-    return ' xpsnr ' in r.stdout
+def find_ffmpeg():
+    # prefer an override, then the local newer build, then PATH
+    for cand in (os.environ.get('FFMPEG'),
+                 os.path.expanduser('~/ffmpeg-hevc/ffmpeg'), 'ffmpeg'):
+        if not cand:
+            continue
+        try:
+            r = subprocess.run([cand, '-hide_banner', '-filters'],
+                               capture_output=True, text=True)
+        except OSError:
+            continue
+        if ' xpsnr ' in r.stdout:
+            return cand
+    return None
 
 
-HAVE_XPSNR = xpsnr_available()
+FFMPEG = find_ffmpeg()
+HAVE_XPSNR = FFMPEG is not None
+
+
+def xpsnr(out, ref):
+    n, _, h, w = out.shape
+    with tempfile.NamedTemporaryFile(suffix='.raw', delete=False) as fa, \
+         tempfile.NamedTemporaryFile(suffix='.raw', delete=False) as fb:
+        out.astype('<u2').tofile(fa.name)
+        ref.astype('<u2').tofile(fb.name)
+        raw = ['-f', 'rawvideo', '-pix_fmt', 'yuv444p16le', '-s', f'{w}x{h}', '-r', '25']
+        r = subprocess.run([FFMPEG, '-hide_banner', *raw, '-i', fa.name,
+                            *raw, '-i', fb.name,
+                            '-lavfi', 'xpsnr', '-f', 'null', '-'],
+                           capture_output=True, text=True)
+    os.unlink(fa.name)
+    os.unlink(fb.name)
+    for line in r.stderr.splitlines():
+        if 'XPSNR' in line and 'y:' in line:
+            parts = line.replace(':', ' ').split()
+            vals = {}
+            for key in ('y', 'u', 'v'):
+                if key in parts:
+                    vals[key] = float(parts[parts.index(key) + 1])
+            return vals
+    return None
 HAVE_SSIMU2 = hasattr(core, 'vszip')
 if not HAVE_XPSNR:
     print('note: ffmpeg xpsnr filter unavailable, skipping XPSNR')
@@ -219,11 +262,13 @@ for standard in STANDARDS:
         recomp = core.composite.Encode(clip_from(degraded), standard=standard)
         if standard == 'pal':
             configs = [('NR 2D t=0.4', dict(dimensions=2, threshold=0.4)),
+                       ('NR 2D eq=0', dict(dimensions=2, eq=0)),
                        ('NR 2D t=0.7', dict(dimensions=2, threshold=0.7)),
                        ('NR 3D t=0.4', dict(dimensions=3, threshold=0.4)),
                        ('NR 3D t=0.7', dict(dimensions=3, threshold=0.7))]
         else:
             configs = [('NR 2D', dict(dimensions=2)),
+                       ('NR 2D eq=0', dict(dimensions=2, eq=0)),
                        ('NR 3D', dict(dimensions=3))]
         for cname, kw in configs:
             nr = to_array(core.composite.Decode(recomp, standard=standard, **kw))
