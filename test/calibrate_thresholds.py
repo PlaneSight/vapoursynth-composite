@@ -9,6 +9,11 @@
 # minimizes kept-luma (cross-color) plus alpha * discarded-chroma
 # (color loss) by a scan over ratio histograms.
 #
+# The same histograms also yield the trained soft LUT (Decode's lut
+# parameter): per (bin, ratio cell), the gain minimizing
+# L*g^2 + alpha*C*(1-g)^2 is the Wiener gain alpha*C / (L + alpha*C) —
+# closed form, no iteration.
+#
 # usage: calibrate_thresholds.py composite.so corpus_dir [frames_per_clip] [2d|3d]
 
 import glob
@@ -147,6 +152,30 @@ def tile_stats_3d(comp_nr, comp_lum, comp_chr, hist_lum, hist_chr):
                     hist_chr[b, bucket] += pw[2][z, y, x] + pw[2][zr, yr, xr]
 
 
+LUT_K = 16
+
+def wiener_lut(hist_lum, hist_chr, alpha):
+    # resample the fine ratio buckets onto LUT_K uniform knots and take
+    # the per-cell Wiener gain; cells with no observed energy inherit
+    # the nearest observed knot
+    lut = np.empty((NBINS, LUT_K))
+    centers = (np.arange(RBUCKETS) + 0.5) / RBUCKETS
+    knot = np.clip(np.round(centers * (LUT_K - 1)).astype(int), 0, LUT_K - 1)
+    for b in range(NBINS):
+        L = np.bincount(knot, weights=hist_lum[b], minlength=LUT_K)
+        C = np.bincount(knot, weights=hist_chr[b], minlength=LUT_K)
+        seen = (L + C) > 0
+        g = np.where(seen, alpha * C / np.maximum(L + alpha * C, 1e-30), 0.0)
+        if seen.any():
+            idx = np.arange(LUT_K)
+            nearest = idx[seen][np.abs(idx[seen][None, :] - idx[:, None]).argmin(axis=1)]
+            g = g[nearest]
+        else:
+            g[:] = 1.0
+        lut[b] = g
+    return np.clip(lut, 0.0, 1.0)
+
+
 def optimal_thresholds(hist_lum, hist_chr, alpha):
     # keep iff r >= t^2: cost(t) = kept luma + alpha * discarded chroma
     th = np.full(NBINS, 0.4)
@@ -193,6 +222,7 @@ for path in train:
 
 np.savez(f'threshold_hists_{MODE}.npz', lum=hist_lum, chr=hist_chr)
 cands = {a: optimal_thresholds(hist_lum, hist_chr, a) for a in (0.5, 1.0, 2.0, 4.0)}
+luts = {a: wiener_lut(hist_lum, hist_chr, a) for a in (0.5, 1.0, 2.0, 4.0)}
 th = cands[ALPHA]
 if MODE == '2d':
     print(f'\ncalibrated thresholds, alpha={ALPHA} (y rows 0-15, x bins fsc/2..fsc):')
@@ -212,8 +242,13 @@ for path in held:
     dims = 2 if MODE == '2d' else 3
     evaluate('uniform 0.4', comp_nr, clean, dimensions=dims)
     evaluate('uniform 0.7', comp_nr, clean, dimensions=dims, threshold=0.7)
+    evaluate('level', comp_nr, clean, dimensions=dims, level=1)
     for a, tha in cands.items():
         evaluate(f'calibrated a={a}', comp_nr, clean, dimensions=dims, thresholds=list(tha))
+    for a, la in luts.items():
+        evaluate(f'lut a={a}', comp_nr, clean, dimensions=dims, lut=list(la.ravel()))
 
 np.savetxt(f'thresholds_pal_{MODE}.txt', th, fmt='%.4f')
-print(f'\nsaved thresholds_pal_{MODE}.txt and threshold_hists_{MODE}.npz')
+np.savetxt(f'lut_pal_{MODE}.txt', luts[ALPHA].ravel(), fmt='%.4f')
+print(f'\nsaved thresholds_pal_{MODE}.txt, lut_pal_{MODE}.txt (alpha={ALPHA}) '
+      f'and threshold_hists_{MODE}.npz')
