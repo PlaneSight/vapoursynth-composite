@@ -102,7 +102,7 @@ int comp_decode_init(comp_decode_t *d, int standard, double threshold,
     /* levels and chroma scales must match the encoder exactly; the
      * encoder is also the resynthesis step of the refine loop */
     comp_encode_t enc;
-    if (comp_encode_init(&enc, standard, setup))
+    if (comp_encode_init(&enc, standard, setup, 0))
         return -1;
     d->enc = enc;
     d->refine = refine;

@@ -53,7 +53,7 @@ static void test_ntsc_roundtrip(int setup, int rows, int row_off)
     comp_decode_t dec;
     const int w = COMP_ACTIVE_WIDTH_NTSC;
 
-    CHECK(comp_encode_init(&enc, COMP_STD_NTSC, setup) == 0, "ntsc encode init");
+    CHECK(comp_encode_init(&enc, COMP_STD_NTSC, setup, 0) == 0, "ntsc encode init");
     CHECK(comp_decode_init(&dec, COMP_STD_NTSC, 0.4, 1, setup, 2, 0, 0) == 0, "ntsc decode init");
 
     for (int r = 0; r < rows; r++) {
@@ -127,7 +127,7 @@ static void test_3d_roundtrip(int standard)
     comp_encode_t enc;
     comp_decode_t dec;
 
-    CHECK(comp_encode_init(&enc, standard, 0) == 0, "3d encode init");
+    CHECK(comp_encode_init(&enc, standard, 0, 0) == 0, "3d encode init");
     CHECK(comp_decode_init(&dec, standard, 0.4, 1, 0, 3, 0, 0) == 0, "3d decode init");
     const int look = comp_decode_look(&dec);
     CHECK(look == (pal ? 3 : 1), "3d look");
@@ -213,7 +213,7 @@ static void test_eq(void)
     comp_decode_t dec0, dec1;
     const int w = COMP_ACTIVE_WIDTH_PAL;
 
-    CHECK(comp_encode_init(&enc, COMP_STD_PAL, 0) == 0, "eq encode init");
+    CHECK(comp_encode_init(&enc, COMP_STD_PAL, 0, 0) == 0, "eq encode init");
     CHECK(comp_decode_init(&dec0, COMP_STD_PAL, 0.4, 1, 0, 2, 0, 0) == 0, "eq=0 init");
     CHECK(comp_decode_init(&dec1, COMP_STD_PAL, 0.4, 1, 0, 2, 1, 0) == 0, "eq=1 init");
 
@@ -281,7 +281,7 @@ static void test_refine(void)
     const comp_frame_view_t v1 = { comp1[0], W };
     const int vf = 0;
 
-    CHECK(comp_encode_init(&enc, COMP_STD_PAL, 0) == 0, "refine enc init");
+    CHECK(comp_encode_init(&enc, COMP_STD_PAL, 0, 0) == 0, "refine enc init");
     CHECK(comp_decode_init(&crude, COMP_STD_PAL, 0.4, 1, 0, 1, 0, 0) == 0, "dims=1 init");
     CHECK(comp_decode_init(&dec0, COMP_STD_PAL, 0.4, 1, 0, 2, 1, 0) == 0, "refine=0 init");
     CHECK(comp_decode_init(&dec2, COMP_STD_PAL, 0.4, 1, 0, 2, 1, 3) == 0, "refine=3 init");
@@ -334,7 +334,7 @@ int main(void)
     comp_encode_t enc;
     comp_decode_t dec;
 
-    CHECK(comp_encode_init(&enc, COMP_STD_PAL, 0) == 0, "encode init");
+    CHECK(comp_encode_init(&enc, COMP_STD_PAL, 0, 0) == 0, "encode init");
     CHECK(comp_decode_init(&dec, COMP_STD_PAL, 0.4, 2, 0, 2, 0, 0) == 0, "decode init");
 
     /* top half: color bars; bottom half: smooth chroma gradients */

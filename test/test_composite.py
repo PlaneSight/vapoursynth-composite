@@ -196,6 +196,16 @@ for pl in range(3):
 rest_n = core.composite.Restore(bff, standard='ntsc', dimensions=3)
 assert (rest_n.width, rest_n.height) == (720, 480)
 rest_n.get_frame(1)
+# ---- precomb: flat chroma unchanged, vertical chroma detail differs
+flat_pc = core.composite.Encode(flat([30000, 40960, 28672]))
+flat_pc1 = core.composite.Encode(flat([30000, 40960, 28672]), precomb=1)
+assert bytes(flat_pc.get_frame(0)[0]) == bytes(flat_pc1.get_frame(0)[0])
+vstripes = core.std.StackVertical([flat([30000, 40960, 28672], h=288),
+                                   flat([30000, 24576, 36864], h=288)])
+assert bytes(core.composite.Encode(vstripes).get_frame(0)[0]) != \
+       bytes(core.composite.Encode(vstripes, precomb=1).get_frame(0)[0])
+core.composite.Restore(tex, precomb=1).get_frame(0)
+
 # ---- per-bin thresholds: uniform list matches the scalar exactly
 tl = core.composite.Decode(enc_t, thresholds=[0.4] * 80)
 ts = core.composite.Decode(enc_t, threshold=0.4)

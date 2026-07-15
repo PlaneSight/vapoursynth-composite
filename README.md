@@ -14,12 +14,15 @@ BBC RD 1986/2.
 
 Alpha. PAL and NTSC round trips work:
 
-- `composite.Encode(clip[, standard, setup])` — YCbCr (any constant YUV
+- `composite.Encode(clip[, standard, setup, precomb])` — YCbCr (any constant YUV
   format) to composite GRAY16 at the 4×fsc active raster: PAL 928×576
   (levels per EBU Tech 3280), NTSC 758×480/486 (levels per SMPTE 244M;
   `setup` adds the 7.5 IRE pedestal). A 480-line NTSC clip occupies the
   486-line BFF raster per its `_FieldBased` frame prop: BFF/DV at rows
-  4..483, TFF/RP 202 at rows 5..484.
+  4..483, TFF/RP 202 at rows 5..484. `precomb` vertically low-passes
+  U/V across same-field lines before modulation (Poynton's precombing) —
+  useful when encoding clean sources for comb decoders, but leave it off
+  in the noise-reduction round trip, where it measurably hurts.
 - `composite.Decode(clip[, standard, width, threshold, setup, dimensions, eq])`
   — composite back to YUV444P16, resampled to `width` (default 720). PAL
   uses Transform PAL chroma separation with PALcolour-style demodulation

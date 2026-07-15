@@ -159,7 +159,7 @@ static void test_ntsc(int setup)
     const int w = COMP_ACTIVE_WIDTH_NTSC;
     const uint16_t black = setup ? 0x4680 : 0x3C00;
 
-    CHECK(comp_encode_init(&enc, COMP_STD_NTSC, setup) == 0, "ntsc init");
+    CHECK(comp_encode_init(&enc, COMP_STD_NTSC, setup, 0) == 0, "ntsc init");
 
     for (int x = 0; x < w; x++) {
         srcy[x] = 16 << 8;
@@ -198,6 +198,61 @@ static void test_ntsc(int setup)
     CHECK(max_diff <= 8, "ntsc setup=%d deviates from reference by %d > 8 LSB", setup, max_diff);
 }
 
+
+/* the vertical precomb must pass vertically flat chroma exactly and
+ * attenuate chroma alternating between same-field lines */
+static void test_precomb(void)
+{
+    static uint16_t py[8][COMP_ACTIVE_WIDTH_PAL], pu[8][COMP_ACTIVE_WIDTH_PAL], pv[8][COMP_ACTIVE_WIDTH_PAL];
+    static uint16_t out0[8][COMP_ACTIVE_WIDTH_PAL], out1[8][COMP_ACTIVE_WIDTH_PAL];
+    comp_encode_t e0, e1;
+    const int w = COMP_ACTIVE_WIDTH_PAL;
+
+    CHECK(comp_encode_init(&e0, COMP_STD_PAL, 0, 0) == 0, "precomb=0 init");
+    CHECK(comp_encode_init(&e1, COMP_STD_PAL, 0, 1) == 0, "precomb=1 init");
+
+    /* vertically flat color */
+    for (int r = 0; r < 8; r++)
+        for (int x = 0; x < w; x++) {
+            py[r][x] = 30000;
+            pu[r][x] = 40960;
+            pv[r][x] = 28672;
+        }
+    comp_encode_frame(&e0, 0, 8, 0, out0[0], w, py[0], w, pu[0], w, pv[0], w);
+    comp_encode_frame(&e1, 0, 8, 0, out1[0], w, py[0], w, pu[0], w, pv[0], w);
+    for (int r = 0; r < 8; r++)
+        for (int x = 0; x < w; x++)
+            CHECK(out0[r][x] == out1[r][x], "precomb changed flat chroma at %d,%d", r, x);
+
+    /* chroma alternating between same-field lines: [1 2 1]/4 across
+     * rows ±2 must attenuate the alternating component to half */
+    for (int r = 0; r < 8; r++)
+        for (int x = 0; x < w; x++) {
+            pu[r][x] = (r / 2 % 2) ? 40960 : 24576;
+            pv[r][x] = 32768;
+        }
+    comp_encode_frame(&e0, 0, 8, 0, out0[0], w, py[0], w, pu[0], w, pv[0], w);
+    comp_encode_frame(&e1, 0, 8, 0, out1[0], w, py[0], w, pu[0], w, pv[0], w);
+    /* measure composite excursion around each line's mean: luma is
+     * constant, so the excursion is the modulated chroma */
+    double a0 = 0.0, a1 = 0.0;
+    for (int r = 2; r < 6; r++) {
+        double m0 = 0.0, m1 = 0.0;
+        for (int x = 16; x < w - 16; x++) {
+            m0 += out0[r][x];
+            m1 += out1[r][x];
+        }
+        m0 /= w - 32;
+        m1 /= w - 32;
+        for (int x = 16; x < w - 16; x++) {
+            a0 += fabs(out0[r][x] - m0);
+            a1 += fabs(out1[r][x] - m1);
+        }
+    }
+    printf("test_encode: precomb alternating-chroma ratio %.3f\n", a1 / a0);
+    CHECK(a1 < a0 * 0.6, "precomb did not attenuate alternating chroma (%f)", a1 / a0);
+}
+
 int main(void)
 {
     comp_encode_t enc;
@@ -205,7 +260,7 @@ int main(void)
     uint16_t dst[COMP_ACTIVE_WIDTH_PAL];
     double ref[COMP_ACTIVE_WIDTH_PAL];
 
-    CHECK(comp_encode_init(&enc, COMP_STD_PAL, 0) == 0, "pal init");
+    CHECK(comp_encode_init(&enc, COMP_STD_PAL, 0, 0) == 0, "pal init");
 
     /* exact luma anchors: black and white map to the CVBS levels */
     for (int x = 0; x < COMP_ACTIVE_WIDTH_PAL; x++) {
@@ -256,6 +311,7 @@ int main(void)
 
     test_ntsc(0);
     test_ntsc(1);
+    test_precomb();
 
     if (!fail)
         printf("test_encode: all tests passed (max diff %d)\n", max_diff);

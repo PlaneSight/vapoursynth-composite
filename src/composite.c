@@ -70,11 +70,8 @@ static const VSFrame *VS_CC comp_encode_get_frame(int n, int activation_reason, 
     uint16_t *dstp = (uint16_t *)vsapi->getWritePtr(dst, 0);
     const ptrdiff_t dstride = vsapi->getStride(dst, 0) / 2;
 
-    const int off = comp_row_offset(f, src, vsapi);
-    for (int r = 0; r < f->vi.height; r++)
-        comp_encode_line(&f->enc, dstp + r * dstride,
-                         srcy + r * ystride, srcu + r * ustride, srcv + r * vstride,
-                         comp_sc_line(f->standard, n, r + off));
+    comp_encode_frame(&f->enc, n, f->vi.height, comp_row_offset(f, src, vsapi),
+                      dstp, dstride, srcy, ystride, srcu, ustride, srcv, vstride);
 
     vsapi->freeFrame(src);
     return dst;
@@ -200,6 +197,7 @@ static void VS_CC comp_encode_create(const VSMap *in, VSMap *out, void *user_dat
         RETERROR("standard must be pal or ntsc");
 
     const int setup = !!vsapi->mapGetIntSaturated(in, "setup", 0, &err);
+    const int precomb = !!vsapi->mapGetIntSaturated(in, "precomb", 0, &err);
 
     if (!vsh_isConstantVideoFormat(&d.vi))
         RETERROR("clip must have constant format and dimensions");
@@ -249,7 +247,7 @@ static void VS_CC comp_encode_create(const VSMap *in, VSMap *out, void *user_dat
     d.node = vsapi->mapGetNode(ret, "clip", 0, NULL);
     vsapi->freeMap(ret);
 
-    comp_encode_init(&d.enc, d.standard, setup);
+    comp_encode_init(&d.enc, d.standard, setup, precomb);
     vsapi->queryVideoFormat(&d.vi.format, cfGray, stInteger, 16, 0, 0, core);
     d.vi.width = width;
 
@@ -296,6 +294,7 @@ static void VS_CC comp_decode_create(const VSMap *in, VSMap *out, void *user_dat
     int eq = vsapi->mapGetIntSaturated(in, "eq", 0, &err);
     if (err)
         eq = 1;
+
 
 
 
@@ -438,6 +437,9 @@ static void VS_CC comp_restore_create(const VSMap *in, VSMap *out, void *user_da
     if (refine < 0 || refine > 16)
         RETERROR("refine must be between 0 and 16");
 
+    const int precomb = !!vsapi->mapGetIntSaturated(in, "precomb", 0, &err);
+
+
     if (!vsh_isConstantVideoFormat(&d.vi))
         RETERROR("clip must have constant format and dimensions");
     if (d.vi.format.colorFamily != cfYUV)
@@ -491,7 +493,7 @@ static void VS_CC comp_restore_create(const VSMap *in, VSMap *out, void *user_da
     edata->node = raster;
     edata->vi = *vsapi->getVideoInfo(raster);
     edata->standard = d.standard;
-    comp_encode_init(&edata->enc, d.standard, setup);
+    comp_encode_init(&edata->enc, d.standard, setup, precomb);
     vsapi->queryVideoFormat(&edata->vi.format, cfGray, stInteger, 16, 0, 0, core);
 
     VSFilterDependency edeps[] = {{ raster, rpStrictSpatial }};
@@ -584,7 +586,8 @@ VS_EXTERNAL_API(void) VapourSynthPluginInit2(VSPlugin *plugin, const VSPLUGINAPI
     vspapi->registerFunction("Encode",
                              "clip:vnode;"
                              "standard:data:opt;"
-                             "setup:int:opt;",
+                             "setup:int:opt;"
+                             "precomb:int:opt;",
                              "clip:vnode;",
                              comp_encode_create, (void *)"Encode", plugin);
     vspapi->registerFunction("Decode",
@@ -607,7 +610,8 @@ VS_EXTERNAL_API(void) VapourSynthPluginInit2(VSPlugin *plugin, const VSPLUGINAPI
                              "dimensions:int:opt;"
                              "eq:int:opt;"
                              "refine:int:opt;"
-                             "thresholds:float[]:opt;",
+                             "thresholds:float[]:opt;"
+                             "precomb:int:opt;",
                              "clip:vnode;",
                              comp_restore_create, (void *)"Restore", plugin);
 }

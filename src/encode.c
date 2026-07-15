@@ -42,8 +42,10 @@ static inline int32_t rdiv32(int64_t num, int32_t den)
     return (int32_t)((num >= 0 ? num + den / 2 : num - den / 2) / den);
 }
 
-int comp_encode_init(comp_encode_t *e, int standard, int setup)
+int comp_encode_init(comp_encode_t *e, int standard, int setup, int precomb)
 {
+    e->precomb = !!precomb;
+
     int32_t level_white;
 
     if (standard == COMP_STD_PAL) {
@@ -134,5 +136,39 @@ void comp_encode_line(const comp_encode_t *e, uint16_t *dst,
         const int32_t out = luma + chroma;
         dst[x] = (uint16_t)(out < LEVEL_MIN ? LEVEL_MIN :
                             out > LEVEL_MAX ? LEVEL_MAX : out);
+    }
+}
+
+void comp_encode_frame(const comp_encode_t *e, int frame, int rows, int row_off,
+                       uint16_t *dst, ptrdiff_t dstride,
+                       const uint16_t *srcy, ptrdiff_t ystride,
+                       const uint16_t *srcu, ptrdiff_t ustride,
+                       const uint16_t *srcv, ptrdiff_t vstride)
+{
+    const int w = e->width;
+
+    for (int r = 0; r < rows; r++) {
+        const comp_sc_line_t sc = comp_sc_line(e->standard, frame, r + row_off);
+
+        if (!e->precomb) {
+            comp_encode_line(e, dst + r * dstride, srcy + r * ystride,
+                             srcu + r * ustride, srcv + r * vstride, sc);
+            continue;
+        }
+
+        /* vertical chroma pre-filter [1 2 1]/4 across the same field's
+         * neighboring lines (rows ±2), the lines the decoder combs;
+         * edges reuse the center row */
+        const int ra = r - 2 >= 0 ? r - 2 : r;
+        const int rb = r + 2 < rows ? r + 2 : r;
+        const uint16_t *ua = srcu + ra * ustride, *u0 = srcu + r * ustride, *ub = srcu + rb * ustride;
+        const uint16_t *va = srcv + ra * vstride, *v0 = srcv + r * vstride, *vb = srcv + rb * vstride;
+        uint16_t uf[COMP_ACTIVE_WIDTH_PAL], vf[COMP_ACTIVE_WIDTH_PAL];
+
+        for (int x = 0; x < w; x++) {
+            uf[x] = (uint16_t)((ua[x] + 2 * u0[x] + ub[x] + 2) >> 2);
+            vf[x] = (uint16_t)((va[x] + 2 * v0[x] + vb[x] + 2) >> 2);
+        }
+        comp_encode_line(e, dst + r * dstride, srcy + r * ystride, uf, vf, sc);
     }
 }
