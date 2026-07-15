@@ -274,6 +274,11 @@ for standard in STANDARDS:
             nr = to_array(core.composite.Decode(recomp, standard=standard, **kw))
             print(fmt(cname, score(nr, clean)))
 
+        for rn in (1, 2, 4):
+            rest = to_array(core.composite.Restore(clip_from(degraded),
+                                                   standard=standard, refine=rn))
+            print(fmt(f'Restore r={rn}', score(rest, clean)))
+
         transparent = to_array(core.composite.Decode(
             core.composite.Encode(clean_clip, standard=standard), standard=standard))
         print(fmt('transparency 2D', score(transparent, clean)))
