@@ -276,7 +276,8 @@ def main():
             else:
                 configs = [('NR 2D', dict(dimensions=2)),
                            ('NR 2D eq=0', dict(dimensions=2, eq=0)),
-                           ('NR 3D', dict(dimensions=3))]
+                           ('NR 3D', dict(dimensions=3)),
+                           ('NR 3D transform', dict(dimensions=3, transform=1))]
             for cname, kw in configs:
                 nr = to_array(core.composite.Decode(recomp, standard=standard, **kw))
                 print(fmt(cname, score(nr, clean)))
