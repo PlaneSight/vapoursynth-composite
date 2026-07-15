@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# Plugin: registration, Encode() PAL behaviour, Decode() passthrough stub,
+# Plugin: registration, Encode()/Decode() PAL behavior, the round trip,
 # argument validation.
 # usage: test_composite.py path/to/composite.so
 
@@ -58,22 +58,37 @@ for bad_args, needle in (
     else:
         assert False, f'expected error: {needle}'
 
-# ---- Decode: still a passthrough stub
-src = flat([126, 128, 128], fmt=vs.YUV420P8, length=3)
-for kwargs in ({}, {'standard': 'pal'}, {'standard': 'ntsc'}):
-    out = core.composite.Decode(src, **kwargs)
-    assert out.num_frames == src.num_frames
-    assert (out.format.id, out.width, out.height) == (src.format.id, src.width, src.height)
-    for n in range(out.num_frames):
-        a, b = out.get_frame(n), src.get_frame(n)
-        for p in range(a.format.num_planes):
-            assert bytes(a[p]) == bytes(b[p])
+# ---- Decode: geometry and format invert Encode
+enc = core.composite.Encode(flat([32128, 40960, 28672], length=5))
+dec = core.composite.Decode(enc)
+assert (dec.width, dec.height) == (720, 576)
+assert dec.format.id == vs.YUV444P16
+assert (dec.fps.numerator, dec.fps.denominator) == (25, 1)
+assert core.composite.Decode(enc, width=928).width == 928
 
-try:
-    core.composite.Decode(src, standard='secam')
-except vs.Error as e:
-    assert 'Decode' in str(e) and 'standard' in str(e)
-else:
-    assert False, 'invalid standard accepted'
+# ---- Round trip: flat color recovered within tolerance in the interior
+src_val = (32128, 40960, 28672)
+fr = dec.get_frame(2)
+for p, want in enumerate(src_val):
+    vals = [fr[p][r, x] for r in (40, 288, 535) for x in range(64, 656, 8)]
+    worst = max(abs(v - want) for v in vals)
+    assert worst <= 64, (p, want, worst)
+
+# ---- Decode: argument validation
+gray = core.std.BlankClip(format=vs.GRAY16, width=928, height=576, length=1)
+for bad_args, needle in (
+    (dict(clip=gray, standard='secam'), 'standard'),
+    (dict(clip=gray, standard='ntsc'), 'not implemented'),
+    (dict(clip=gray, threshold=0.0), 'threshold'),
+    (dict(clip=gray, width=4), 'width'),
+    (dict(clip=core.std.BlankClip(format=vs.GRAY16, width=720, height=576)), '928x576'),
+    (dict(clip=flat([126, 128, 128], fmt=vs.YUV420P8)), 'GRAY16'),
+):
+    try:
+        core.composite.Decode(**bad_args)
+    except vs.Error as e:
+        assert 'Decode' in str(e) and needle in str(e), (needle, str(e))
+    else:
+        assert False, f'expected error: {needle}'
 
 print('test_composite: all tests passed')

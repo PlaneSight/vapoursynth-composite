@@ -12,16 +12,25 @@ BBC RD 1986/2.
 
 ## Status
 
-Pre-alpha. `composite.Encode()` and `composite.Decode()` are registered
-but are passthrough stubs; the signal processing is under development.
+Alpha. The PAL round trip works:
+
+- `composite.Encode(clip[, standard])` — YCbCr (any constant YUV format,
+  576 lines) to composite GRAY16 at the 4×fsc active raster (928×576),
+  levels per EBU Tech 3280 (black 0x4000, white 0xD300).
+- `composite.Decode(clip[, standard, width, threshold])` — composite back
+  to YUV444P16 via 2D Transform PAL chroma separation and PALcolour-style
+  demodulation, resampled to `width` (default 720).
+
+NTSC is not implemented yet.
 
 ## Building
 
     meson setup build
     ninja -C build
 
-Requires Meson, a C99 compiler, and VapourSynth (V4 API) with the
-Python module available for header discovery.
+Requires Meson, a C99 compiler, FFTW3 (single precision), and
+VapourSynth (V4 API) with the Python module available for header
+discovery.
 
 ## Testing
 
