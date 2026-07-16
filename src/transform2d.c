@@ -36,12 +36,14 @@ static double compute_window(int element, int limit)
     return 0.5 - 0.5 * cos((2.0 * M_PI * (element + 0.5)) / limit);
 }
 
-int comp_transform2d_init(comp_transform2d_t *t, double threshold, int level)
+int comp_transform2d_init(comp_transform2d_t *t, double threshold, int level,
+                          double evidence)
 {
-    if (!(threshold > 0.0 && threshold <= 1.0))
+    if (!(threshold > 0.0 && threshold <= 1.0) || evidence < 0.0)
         return -1;
     t->level = !!level;
     t->use_lut = 0;
+    t->evidence = (float)evidence;
     for (int i = 0; i < COMP_T2D_NTHRESH; i++)
         t->threshold_sq[i] = (float)(threshold * threshold);
 
@@ -146,9 +148,31 @@ static float apply_filter(const comp_transform2d_t *t,
             const float hi = m_in_sq < m_ref_sq ? m_ref_sq : m_in_sq;
             const float r = hi > 0.0f ? lo / hi : 1.0f;
 
+            /* LF-luma evidence at the pair's baseband difference
+             * frequency k - c (both members map to one stored bin by
+             * conjugate symmetry); no LF partner marks cross-color.
+             * U and V carriers are the two fixed points of the pair
+             * reflection (y = YTILE/4 and 3*YTILE/4), so take the
+             * stronger of the two difference positions. */
+            float g_e = 1.0f;
+            if (t->evidence > 0.0f) {
+                const fftwf_complex *lf1 =
+                    in + (((YTILE / 4) - y + YTILE) % YTILE) * XCOMPLEX
+                       + (XTILE / 4) - x;
+                const fftwf_complex *lf2 =
+                    in + ((3 * (YTILE / 4) - y + YTILE) % YTILE) * XCOMPLEX
+                       + (XTILE / 4) - x;
+                const float e1 = (*lf1)[0] * (*lf1)[0] + (*lf1)[1] * (*lf1)[1];
+                const float e2 = (*lf2)[0] * (*lf2)[0] + (*lf2)[1] * (*lf2)[1];
+                const float e = e1 > e2 ? e1 : e2;
+                const float den = e + t->evidence * hi;
+                if (den > 0.0f)
+                    g_e = e / den;
+            }
+
             if (t->use_lut) {
                 const int bin = (int)(tsq - t->threshold_sq) - 1;
-                const float g = lut_gain(t->lut[bin], lo, hi);
+                const float g = lut_gain(t->lut[bin], lo, hi) * g_e;
                 bo[x][0] = bi[x][0] * g;
                 bo[x][1] = bi[x][1] * g;
                 bo_ref[x_ref][0] = bi_ref[x_ref][0] * g;
@@ -160,17 +184,17 @@ static float apply_filter(const comp_transform2d_t *t,
             }
 
             if (t->level) {
-                float f_in = 1.0f, f_ref = 1.0f;
+                float f_in = g_e, f_ref = g_e;
                 if (m_in_sq > m_ref_sq)
-                    f_in = sqrtf(m_ref_sq / m_in_sq);
+                    f_in *= sqrtf(m_ref_sq / m_in_sq);
                 else if (m_ref_sq > m_in_sq)
-                    f_ref = sqrtf(m_in_sq / m_ref_sq);
+                    f_ref *= sqrtf(m_in_sq / m_ref_sq);
                 bo[x][0] = bi[x][0] * f_in;
                 bo[x][1] = bi[x][1] * f_in;
                 bo_ref[x_ref][0] = bi_ref[x_ref][0] * f_ref;
                 bo_ref[x_ref][1] = bi_ref[x_ref][1] * f_ref;
-                conf_num += 2.0f * lo * r;
-                conf_den += 2.0f * lo;
+                conf_num += 2.0f * lo * g_e * g_e * r;
+                conf_den += 2.0f * lo * g_e * g_e;
                 continue;
             }
 
@@ -178,12 +202,12 @@ static float apply_filter(const comp_transform2d_t *t,
                 m_ref_sq < m_in_sq * threshold_sq)
                 continue;  /* asymmetric: probably not chroma */
 
-            bo[x][0] = bi[x][0];
-            bo[x][1] = bi[x][1];
-            bo_ref[x_ref][0] = bi_ref[x_ref][0];
-            bo_ref[x_ref][1] = bi_ref[x_ref][1];
-            conf_num += (m_in_sq + m_ref_sq) * r;
-            conf_den += m_in_sq + m_ref_sq;
+            bo[x][0] = bi[x][0] * g_e;
+            bo[x][1] = bi[x][1] * g_e;
+            bo_ref[x_ref][0] = bi_ref[x_ref][0] * g_e;
+            bo_ref[x_ref][1] = bi_ref[x_ref][1] * g_e;
+            conf_num += (m_in_sq + m_ref_sq) * g_e * g_e * r;
+            conf_den += (m_in_sq + m_ref_sq) * g_e * g_e;
         }
     }
 

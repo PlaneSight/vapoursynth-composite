@@ -71,10 +71,12 @@ struct comp_decode_t {
  * (NTSC, dimensions=3 only); level selects the
  * transform's amplitude-limiting mode (threshold then unused).
  * eq: 0 off, 1 the fixed cascade inverse, 2 leak-aware (the boost is
- * scaled by the transform's confidence map; needs a transform path). */
+ * scaled by the transform's confidence map; needs a transform path).
+ * evidence > 0 enables the LF-luma prior (PAL transforms only; see
+ * transform2d.h). */
 int comp_decode_init(comp_decode_t *d, int standard, double threshold,
                      int nscratch, int setup, int dimensions, int eq, int refine,
-                     int use_transform, int level);
+                     int use_transform, int level, double evidence);
 void comp_decode_free(comp_decode_t *d);
 
 /* override the Transform PAL per-bin thresholds after init; n must be

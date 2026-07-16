@@ -333,6 +333,29 @@ except vs.Error as e:
 else:
     assert False, 'thresholds accepted for the ntsc comb'
 
+# ---- LF-luma evidence prior: flat color must survive, params validate
+for dims in (2, 3):
+    ev = core.composite.Decode(core.composite.Encode(pal_src), dimensions=dims,
+                               evidence=1.0)
+    fr = ev.get_frame(4)
+    for pl, want in enumerate((32128, 40960, 28672)):
+        vals = [fr[pl][r, x] for r in (40, 288, 535) for x in range(64, 656, 8)]
+        worst = max(abs(v - want) for v in vals)
+        assert worst <= 192, ('evidence-flat', dims, pl, want, worst)
+core.composite.Restore(tex, evidence=1.0).get_frame(0)
+for bad_kw, needle in ((dict(evidence=-1.0), '>= 0'),
+                       (dict(evidence=1.0, dimensions=1), 'dimensions 2 or 3'),
+                       (dict(evidence=1.0, standard='ntsc', dimensions=3,
+                             transform=1), 'pal')):
+    try:
+        core.composite.Decode(core.composite.Encode(bff, standard='ntsc')
+                              if bad_kw.get('standard') == 'ntsc' else enc_t,
+                              **bad_kw)
+    except vs.Error as e:
+        assert needle in str(e), (needle, str(e))
+    else:
+        assert False, f'expected error: {needle}'
+
 # ---- leak-aware eq: works on PAL transforms, differs from eq=1
 eq2 = core.composite.Decode(enc_t, eq=2)
 fr = eq2.get_frame(0)

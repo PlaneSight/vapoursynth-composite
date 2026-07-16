@@ -29,6 +29,7 @@ struct comp_transform2d_t {
     fftwf_plan inverse;
     int level;
     int use_lut;
+    float evidence;
     float window[COMP_T2D_YTILE][COMP_T2D_XTILE];
     float threshold_sq[COMP_T2D_NTHRESH];
     float lut[COMP_T2D_NTHRESH][COMP_LUT_K];
@@ -36,8 +37,14 @@ struct comp_transform2d_t {
 
 /* threshold is the bin-symmetry ratio, (0,1]; 0.4 is the reference
  * default. level selects amplitude limiting instead: each bin pair has
- * the larger magnitude set to the smaller (threshold then unused). */
-int comp_transform2d_init(comp_transform2d_t *t, double threshold, int level);
+ * the larger magnitude set to the smaller (threshold then unused).
+ * evidence > 0 scales every pair by e/(e + evidence*b): e the squared
+ * magnitude of the low-frequency luma bin at the pair's baseband
+ * difference frequency, b the pair's larger squared magnitude — the
+ * scene-statistics prior of US 7,872,689 (true chroma detail
+ * co-locates with LF luma detail; cross-color does not). */
+int comp_transform2d_init(comp_transform2d_t *t, double threshold, int level,
+                          double evidence);
 
 /* install a trained per-bin soft-gain LUT (COMP_T2D_NTHRESH * COMP_LUT_K
  * values in [0,1], knots innermost), replacing the pair test */

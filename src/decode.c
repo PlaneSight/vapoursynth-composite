@@ -93,9 +93,12 @@ static void design_eq(comp_decode_t *d, const int16_t *enc_taps, int enc_n,
 
 int comp_decode_init(comp_decode_t *d, int standard, double threshold,
                      int nscratch, int setup, int dimensions, int eq, int refine,
-                     int use_transform, int level)
+                     int use_transform, int level, double evidence)
 {
     if (nscratch < 1 || dimensions < 1 || dimensions > 3 || refine < 0)
+        return -1;
+    if (evidence < 0.0 || (evidence > 0.0
+                           && (standard != COMP_STD_PAL || dimensions < 2)))
         return -1;
     if (use_transform < 0 || use_transform > 2)
         return -1;
@@ -173,8 +176,10 @@ int comp_decode_init(comp_decode_t *d, int standard, double threshold,
             design_eq(d, enc.uv_taps, enc.uv_ntaps, prof, 2 * FS + 1);
         }
 
-        if (dimensions == 2 ? comp_transform2d_init(&d->transform, threshold, level)
-                            : comp_transform3d_init(&d->transform3, threshold, standard, level))
+        if (dimensions == 2
+            ? comp_transform2d_init(&d->transform, threshold, level, evidence)
+            : comp_transform3d_init(&d->transform3, threshold, standard, level,
+                                    evidence))
             return -1;
     } else if (standard == COMP_STD_PAL) {
         /* dimensions=1 uses the crude path only */
@@ -188,7 +193,8 @@ int comp_decode_init(comp_decode_t *d, int standard, double threshold,
         /* the comb's adaptivity range: 45 IRE of the encoded span */
         d->comb_krange = (int32_t)lrint(45.0 * (0xC800 - d->level_black) / 100.0);
 
-        if (use_transform && comp_transform3d_init(&d->transform3, threshold, standard, level))
+        if (use_transform && comp_transform3d_init(&d->transform3, threshold,
+                                                   standard, level, 0.0))
             return -1;
 
         if (eq) {

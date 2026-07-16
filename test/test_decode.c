@@ -58,7 +58,7 @@ static void test_ntsc_roundtrip(int setup, int rows, int row_off)
     const int w = COMP_ACTIVE_WIDTH_NTSC;
 
     CHECK(comp_encode_init(&enc, COMP_STD_NTSC, setup, 0) == 0, "ntsc encode init");
-    CHECK(comp_decode_init(&dec, COMP_STD_NTSC, 0.4, 1, setup, 2, 0, 0, 0, 0) == 0, "ntsc decode init");
+    CHECK(comp_decode_init(&dec, COMP_STD_NTSC, 0.4, 1, setup, 2, 0, 0, 0, 0, 0.0) == 0, "ntsc decode init");
 
     for (int r = 0; r < rows; r++) {
         for (int x = 0; x < w; x++) {
@@ -132,7 +132,7 @@ static void test_3d_roundtrip(int standard, int use_transform, int level)
     comp_decode_t dec;
 
     CHECK(comp_encode_init(&enc, standard, 0, 0) == 0, "3d encode init");
-    CHECK(comp_decode_init(&dec, standard, 0.4, 1, 0, 3, 0, 0, use_transform, level) == 0, "3d decode init");
+    CHECK(comp_decode_init(&dec, standard, 0.4, 1, 0, 3, 0, 0, use_transform, level, 0.0) == 0, "3d decode init");
     const int look = comp_decode_look(&dec);
     CHECK(look == ((pal || use_transform) ? 3 : 1), "3d look");
     (void)look;
@@ -224,16 +224,16 @@ static void test_eq(void)
     const int w = COMP_ACTIVE_WIDTH_PAL;
 
     CHECK(comp_encode_init(&enc, COMP_STD_PAL, 0, 0) == 0, "eq encode init");
-    CHECK(comp_decode_init(&dec0, COMP_STD_PAL, 0.4, 1, 0, 2, 0, 0, 0, 0) == 0, "eq=0 init");
-    CHECK(comp_decode_init(&dec1, COMP_STD_PAL, 0.4, 1, 0, 2, 1, 0, 0, 0) == 0, "eq=1 init");
-    CHECK(comp_decode_init(&dec2, COMP_STD_PAL, 0.4, 1, 0, 2, 2, 0, 0, 0) == 0, "eq=2 init");
-    CHECK(comp_decode_init(&dec2, COMP_STD_NTSC, 0.4, 1, 0, 2, 2, 0, 0, 0) != 0,
+    CHECK(comp_decode_init(&dec0, COMP_STD_PAL, 0.4, 1, 0, 2, 0, 0, 0, 0, 0.0) == 0, "eq=0 init");
+    CHECK(comp_decode_init(&dec1, COMP_STD_PAL, 0.4, 1, 0, 2, 1, 0, 0, 0, 0.0) == 0, "eq=1 init");
+    CHECK(comp_decode_init(&dec2, COMP_STD_PAL, 0.4, 1, 0, 2, 2, 0, 0, 0, 0.0) == 0, "eq=2 init");
+    CHECK(comp_decode_init(&dec2, COMP_STD_NTSC, 0.4, 1, 0, 2, 2, 0, 0, 0, 0.0) != 0,
           "eq=2 on the ntsc comb must be rejected");
-    CHECK(comp_decode_init(&dec2, COMP_STD_PAL, 0.4, 1, 0, 1, 2, 0, 0, 0) != 0,
+    CHECK(comp_decode_init(&dec2, COMP_STD_PAL, 0.4, 1, 0, 1, 2, 0, 0, 0, 0.0) != 0,
           "eq=2 with dimensions=1 must be rejected");
-    CHECK(comp_decode_init(&dec2, COMP_STD_PAL, 0.4, 1, 0, 2, 3, 0, 0, 0) != 0,
+    CHECK(comp_decode_init(&dec2, COMP_STD_PAL, 0.4, 1, 0, 2, 3, 0, 0, 0, 0.0) != 0,
           "eq=3 must be rejected");
-    CHECK(comp_decode_init(&dec2, COMP_STD_PAL, 0.4, 1, 0, 2, 2, 0, 0, 0) == 0, "eq=2 re-init");
+    CHECK(comp_decode_init(&dec2, COMP_STD_PAL, 0.4, 1, 0, 2, 2, 0, 0, 0, 0.0) == 0, "eq=2 re-init");
 
     /* flat luma, U carries a horizontal frequency sweep */
     for (int r = 0; r < H; r++) {
@@ -338,9 +338,9 @@ static void test_refine(void)
     const int vf = 0;
 
     CHECK(comp_encode_init(&enc, COMP_STD_PAL, 0, 0) == 0, "refine enc init");
-    CHECK(comp_decode_init(&crude, COMP_STD_PAL, 0.4, 1, 0, 1, 0, 0, 0, 0) == 0, "dims=1 init");
-    CHECK(comp_decode_init(&dec0, COMP_STD_PAL, 0.4, 1, 0, 2, 1, 0, 0, 0) == 0, "refine=0 init");
-    CHECK(comp_decode_init(&dec2, COMP_STD_PAL, 0.4, 1, 0, 2, 1, 3, 0, 0) == 0, "refine=3 init");
+    CHECK(comp_decode_init(&crude, COMP_STD_PAL, 0.4, 1, 0, 1, 0, 0, 0, 0, 0.0) == 0, "dims=1 init");
+    CHECK(comp_decode_init(&dec0, COMP_STD_PAL, 0.4, 1, 0, 2, 1, 0, 0, 0, 0.0) == 0, "refine=0 init");
+    CHECK(comp_decode_init(&dec2, COMP_STD_PAL, 0.4, 1, 0, 2, 1, 3, 0, 0, 0.0) == 0, "refine=3 init");
 
     /* luma frequency sweep on gray: the crude notch destroys luma near
      * fsc and turns it into cross-color */
@@ -392,7 +392,7 @@ static void test_pal2d_roundtrip(int level)
     comp_decode_t dec;
 
     CHECK(comp_encode_init(&enc, COMP_STD_PAL, 0, 0) == 0, "encode init");
-    CHECK(comp_decode_init(&dec, COMP_STD_PAL, 0.4, 2, 0, 2, 0, 0, 0, level) == 0, "decode init");
+    CHECK(comp_decode_init(&dec, COMP_STD_PAL, 0.4, 2, 0, 2, 0, 0, 0, level, 0.0) == 0, "decode init");
 
     /* top half: color bars; bottom half: smooth chroma gradients */
     for (int r = 0; r < H; r++) {
@@ -470,9 +470,9 @@ static void test_lut(void)
 
     CHECK(comp_encode_init(&enc, COMP_STD_PAL, 0, 0) == 0, "lut encode init");
     /* threshold so small its float square is 0: keeps every pair */
-    CHECK(comp_decode_init(&dec_th, COMP_STD_PAL, 1e-30, 1, 0, 2, 0, 0, 0, 0) == 0,
+    CHECK(comp_decode_init(&dec_th, COMP_STD_PAL, 1e-30, 1, 0, 2, 0, 0, 0, 0, 0.0) == 0,
           "lut threshold init");
-    CHECK(comp_decode_init(&dec_lut, COMP_STD_PAL, 0.4, 1, 0, 2, 0, 0, 0, 0) == 0,
+    CHECK(comp_decode_init(&dec_lut, COMP_STD_PAL, 0.4, 1, 0, 2, 0, 0, 0, 0, 0.0) == 0,
           "lut decode init");
     CHECK(comp_decode_set_lut(&dec_lut, ones, COMP_T2D_NTHRESH * COMP_LUT_K) == 0,
           "set_lut");
@@ -498,12 +498,12 @@ static void test_lut(void)
     comp_decode_free(&dec_lut);
 
     comp_decode_t dec_n;
-    CHECK(comp_decode_init(&dec_n, COMP_STD_NTSC, 0.4, 1, 0, 3, 0, 0, 1, 0) == 0,
+    CHECK(comp_decode_init(&dec_n, COMP_STD_NTSC, 0.4, 1, 0, 3, 0, 0, 1, 0, 0.0) == 0,
           "ntsc transform init");
     CHECK(comp_decode_set_lut(&dec_n, ones, COMP_T3D_NTHRESH * COMP_LUT_K) == 0,
           "lut on the ntsc transform must be accepted");
     comp_decode_free(&dec_n);
-    CHECK(comp_decode_init(&dec_n, COMP_STD_NTSC, 0.4, 1, 0, 3, 0, 0, 0, 0) == 0,
+    CHECK(comp_decode_init(&dec_n, COMP_STD_NTSC, 0.4, 1, 0, 3, 0, 0, 0, 0, 0.0) == 0,
           "ntsc comb init");
     CHECK(comp_decode_set_lut(&dec_n, ones, COMP_T3D_NTHRESH * COMP_LUT_K) != 0,
           "lut on the ntsc comb must be rejected");
@@ -515,9 +515,15 @@ int main(void)
     comp_decode_t dec;
 
     /* level mode needs a transform: crude PAL and comb NTSC must refuse */
-    CHECK(comp_decode_init(&dec, COMP_STD_PAL, 0.4, 1, 0, 1, 0, 0, 0, 1) != 0,
+    CHECK(comp_decode_init(&dec, COMP_STD_PAL, 0.4, 1, 0, 1, 0, 0, 0, 1, 0.0) != 0,
           "level=1 with dimensions=1 must be rejected");
-    CHECK(comp_decode_init(&dec, COMP_STD_NTSC, 0.4, 1, 0, 3, 0, 0, 0, 1) != 0,
+    CHECK(comp_decode_init(&dec, COMP_STD_PAL, 0.4, 1, 0, 2, 0, 0, 0, 0, -1.0) != 0,
+          "negative evidence must be rejected");
+    CHECK(comp_decode_init(&dec, COMP_STD_NTSC, 0.4, 1, 0, 3, 0, 0, 1, 0, 1.0) != 0,
+          "evidence on ntsc must be rejected");
+    CHECK(comp_decode_init(&dec, COMP_STD_PAL, 0.4, 1, 0, 1, 0, 0, 0, 0, 1.0) != 0,
+          "evidence with dimensions=1 must be rejected");
+    CHECK(comp_decode_init(&dec, COMP_STD_NTSC, 0.4, 1, 0, 3, 0, 0, 0, 1, 0.0) != 0,
           "level=1 with the ntsc comb must be rejected");
 
     test_pal2d_roundtrip(0);

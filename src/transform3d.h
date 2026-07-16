@@ -37,6 +37,7 @@ struct comp_transform3d_t {
     int standard;
     int level;
     int use_lut;
+    float evidence;
     float window[COMP_T3D_ZTILE][COMP_T3D_YTILE][COMP_T3D_XTILE];
     float threshold_sq[COMP_T3D_NTHRESH];
     float lut[COMP_T3D_NTHRESH][COMP_LUT_K];
@@ -47,9 +48,11 @@ struct comp_transform3d_t {
  * (fsc, 120 c/aph, 15 Hz) with luma-reference evidence and a
  * frequency-shaped threshold, since NTSC's shared U/V carrier makes
  * the symmetry only approximate. level selects amplitude limiting
- * instead of the threshold test (threshold then unused). */
+ * instead of the threshold test (threshold then unused). evidence > 0
+ * enables the LF-luma prior of US 7,872,689 (PAL only; see
+ * transform2d.h). */
 int comp_transform3d_init(comp_transform3d_t *t, double threshold, int standard,
-                          int level);
+                          int level, double evidence);
 void comp_transform3d_free(comp_transform3d_t *t);
 
 /* install a trained per-bin soft-gain LUT (COMP_T3D_NTHRESH * COMP_LUT_K

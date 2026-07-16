@@ -23,7 +23,7 @@ Alpha. PAL and NTSC round trips work:
   U/V across same-field lines before modulation (Poynton's precombing) —
   useful when encoding clean sources for comb decoders, but leave it off
   in the noise-reduction round trip, where it measurably hurts.
-- `composite.Decode(clip[, standard, width, threshold, setup, dimensions, eq, thresholds, transform, level, lut])`
+- `composite.Decode(clip[, standard, width, threshold, setup, dimensions, eq, thresholds, transform, level, lut, evidence])`
   — composite back to YUV444P16, resampled to `width` (default 720). PAL
   uses Transform PAL chroma separation with PALcolour-style demodulation
   (`threshold` is the transform's bin-symmetry ratio); NTSC uses an
@@ -66,8 +66,15 @@ Alpha. PAL and NTSC round trips work:
   encoder-linearity energy labels); test/lut_pal_{2d,3d}.txt and
   test/lut_ntsc.txt are sets trained on the VQEG 625/525-line corpora,
   and its ntsc mode also emits calibrated per-bin t0 values for the
-  shaped threshold (test/thresholds_ntsc.txt).
-- `composite.Restore(clip[, standard, width, threshold, setup, dimensions, eq, refine, thresholds, precomb, transform, level, lut])`
+  shaped threshold (test/thresholds_ntsc.txt). `evidence` (PAL
+  transforms, default 0 = off) enables US 7,872,689's low-frequency
+  luma prior: pairs whose baseband difference frequency has no LF luma
+  partner are attenuated by e/(e + evidence*b) — real chroma detail
+  co-locates with luma detail, cross-color does not. On artifact-heavy
+  real footage (evidence around 0.5-1) it cuts residual chroma flicker
+  meaningfully with flat and quiet regions untouched, but it can soften
+  saturated color edges whose luma is flat, so it is opt-in.
+- `composite.Restore(clip[, standard, width, threshold, setup, dimensions, eq, refine, thresholds, precomb, transform, level, lut, evidence])`
   — the whole noise-reduction round trip in one call. `refine` (default
   1) runs that many analysis-by-synthesis iterations that deconvolve a
   crude-decoder model against the input picture, recovering luma detail
