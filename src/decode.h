@@ -68,7 +68,7 @@ struct comp_decode_t {
  * instead of the comb (NTSC, dimensions=3 only); level selects the
  * transform's amplitude-limiting mode (threshold then unused).
  * eq: 0 off, 1 the fixed cascade inverse, 2 leak-aware (the boost is
- * scaled by the transform's confidence map; PAL dimensions >= 2). */
+ * scaled by the transform's confidence map; needs a transform path). */
 int comp_decode_init(comp_decode_t *d, int standard, double threshold,
                      int nscratch, int setup, int dimensions, int eq, int refine,
                      int use_transform, int level);
@@ -78,7 +78,7 @@ void comp_decode_free(comp_decode_t *d);
  * COMP_T2D_NTHRESH (dimensions=2) or COMP_T3D_NTHRESH (dimensions=3) */
 int comp_decode_set_thresholds(comp_decode_t *d, const double *t, int n);
 
-/* install a trained per-bin soft-gain LUT (Transform PAL only),
+/* install a trained per-bin soft-gain LUT (transform separations only),
  * replacing the pair test; n must be the bin count * COMP_LUT_K */
 int comp_decode_set_lut(comp_decode_t *d, const double *v, int n);
 

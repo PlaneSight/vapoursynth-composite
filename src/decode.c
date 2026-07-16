@@ -103,7 +103,7 @@ int comp_decode_init(comp_decode_t *d, int standard, double threshold,
         return -1;
     if (eq < 0 || eq > 2)
         return -1;
-    if (eq == 2 && (standard != COMP_STD_PAL || dimensions < 2))
+    if (eq == 2 && !(standard == COMP_STD_PAL ? dimensions >= 2 : use_transform))
         return -1;
 
     memset(d, 0, sizeof(*d));
@@ -282,9 +282,10 @@ int comp_decode_set_thresholds(comp_decode_t *d, const double *t, int n)
 
 int comp_decode_set_lut(comp_decode_t *d, const double *v, int n)
 {
-    if (d->standard != COMP_STD_PAL)
+    if (d->standard != COMP_STD_PAL && !d->use_transform)
         return -1;
-    if (d->dimensions == 2 && n == COMP_T2D_NTHRESH * COMP_LUT_K) {
+    if (d->standard == COMP_STD_PAL && d->dimensions == 2
+        && n == COMP_T2D_NTHRESH * COMP_LUT_K) {
         comp_transform2d_set_lut(&d->transform, v);
         return 0;
     }
@@ -666,10 +667,12 @@ static void ntsc_split3d(const comp_decode_t *d, int rows, int row_off,
 }
 
 /* Demodulate one NTSC line: product demod against the trivial 4xfsc
- * carriers, the reference's colour low-pass, rotation onto U/V, and
- * luma as composite minus the resynthesised filtered chroma. */
+ * carriers, the reference's color low-pass, rotation onto U/V, and
+ * luma as composite minus the resynthesized filtered chroma. conf
+ * (may be NULL) is the transform's confidence row for the eq=2 blend. */
 static void ntsc_demod_line(const comp_decode_t *d, int frame, int raster_row,
                             const uint16_t *comp_row, const int16_t *chroma_row,
+                            const float *conf,
                             uint16_t *outy, uint16_t *outu, uint16_t *outv)
 {
     const int w = d->width;
@@ -729,6 +732,19 @@ static void ntsc_demod_line(const comp_decode_t *d, int frame, int raster_row,
     if (d->eq) {
         eq_row(d, u_row, u_eq, w);
         eq_row(d, v_row, v_eq, w);
+        if (d->eq == 2 && conf) {
+            /* the PAL blend: boost scaled by the fourth power of the
+             * transform's pair-symmetry confidence */
+            for (int x = 0; x < w; x++) {
+                const float c2 = conf[x] * conf[x];
+                int32_t wq = (int32_t)lrintf(c2 * c2 * 32768.0f);
+                wq = wq < 0 ? 0 : wq > 32768 ? 32768 : wq;
+                u_eq[x] = u_row[x]
+                    + (int32_t)(((int64_t)wq * (u_eq[x] - u_row[x])) >> 15);
+                v_eq[x] = v_row[x]
+                    + (int32_t)(((int64_t)wq * (v_eq[x] - v_row[x])) >> 15);
+            }
+        }
         u_out = u_eq;
         v_out = v_eq;
     }
@@ -951,7 +967,7 @@ void comp_decode_frame(comp_decode_t *d, int frame, int nframes,
             comp_transform3d_frame(&d->transform3, fields, z0, nfields,
                                    frame, parity, w, rows / 2,
                                    s->chroma_f, s->chroma_f + w, 2 * w,
-                                   NULL, NULL);
+                                   s->conf, s->conf ? s->conf + w : NULL);
             for (int i = 0; i < w * rows; i++)
                 s->chroma[i] = clamp_i16(lrintf(s->chroma_f[i]));
         } else if (d->dimensions == 2) {
@@ -969,11 +985,13 @@ void comp_decode_frame(comp_decode_t *d, int frame, int nframes,
                 c1[k] = b1;
                 c2[k] = b2;
             }
-            ntsc_split3d(d, rows, row_off, views, view_frames, c1, c2, s->chroma);
+            ntsc_split3d(d, rows, row_off, views, view_frames, c1, c2,
+                         s->chroma);
         }
         for (int r = 0; r < rows; r++)
             ntsc_demod_line(d, frame, r + row_off,
                             comp + r * comp_stride, s->chroma + r * w,
+                            s->conf ? s->conf + r * w : NULL,
                             dsty + r * ystride, dstu + r * ustride,
                             dstv + r * vstride);
     }

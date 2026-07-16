@@ -296,8 +296,6 @@ static void VS_CC comp_decode_create(const VSMap *in, VSMap *out, void *user_dat
         eq = 1;
     if (eq < 0 || eq > 2)
         RETERROR("eq must be 0 (off), 1 (fixed) or 2 (leak-aware)");
-    if (eq == 2 && (d.standard != COMP_STD_PAL || dimensions < 2))
-        RETERROR("eq=2 needs a pal transform (dimensions 2 or 3)");
 
 
 
@@ -310,6 +308,8 @@ static void VS_CC comp_decode_create(const VSMap *in, VSMap *out, void *user_dat
         RETERROR("transform=1 applies to ntsc (pal always uses the transform)");
     if (transform && dimensions != 3)
         RETERROR("transform=1 needs dimensions=3");
+    if (eq == 2 && !(d.standard == COMP_STD_PAL ? dimensions >= 2 : transform))
+        RETERROR("eq=2 needs a transform separation");
 
     int level = vsapi->mapGetIntSaturated(in, "level", 0, &err);
     if (err)
@@ -317,12 +317,12 @@ static void VS_CC comp_decode_create(const VSMap *in, VSMap *out, void *user_dat
     if (level && dimensions < 2)
         RETERROR("level=1 needs dimensions 2 or 3");
     if (level && d.standard == COMP_STD_NTSC && !transform)
-        RETERROR("level=1 needs transform=1 for ntsc");
+        RETERROR("level=1 needs a transform separation for ntsc");
 
     const int nlut = vsapi->mapNumElements(in, "lut");
     if (nlut > 0) {
-        if (d.standard != COMP_STD_PAL)
-            RETERROR("lut is Transform PAL only");
+        if (d.standard == COMP_STD_NTSC && !transform)
+            RETERROR("lut needs a transform separation");
         if (level)
             RETERROR("lut and level are mutually exclusive");
         if (dimensions == 2 && nlut != COMP_T2D_NTHRESH * COMP_LUT_K)
@@ -369,8 +369,8 @@ static void VS_CC comp_decode_create(const VSMap *in, VSMap *out, void *user_dat
 
     const int nthresh = vsapi->mapNumElements(in, "thresholds");
     if (nthresh > 0) {
-        if (d.standard != COMP_STD_PAL)
-            RETERROR("thresholds is Transform PAL only");
+        if (d.standard == COMP_STD_NTSC && !transform)
+            RETERROR("thresholds needs a transform separation for ntsc");
         if (level)
             RETERROR("thresholds needs the threshold mode (level=0)");
         if (dimensions == 2 && nthresh != COMP_T2D_NTHRESH)
@@ -479,8 +479,6 @@ static void VS_CC comp_restore_create(const VSMap *in, VSMap *out, void *user_da
         eq = 1;
     if (eq < 0 || eq > 2)
         RETERROR("eq must be 0 (off), 1 (fixed) or 2 (leak-aware)");
-    if (eq == 2 && (d.standard != COMP_STD_PAL || dimensions < 2))
-        RETERROR("eq=2 needs a pal transform (dimensions 2 or 3)");
 
     int refine = vsapi->mapGetIntSaturated(in, "refine", 0, &err);
     if (err)
@@ -497,6 +495,8 @@ static void VS_CC comp_restore_create(const VSMap *in, VSMap *out, void *user_da
         RETERROR("transform=1 applies to ntsc (pal always uses the transform)");
     if (transform && dimensions != 3)
         RETERROR("transform=1 needs dimensions=3");
+    if (eq == 2 && !(d.standard == COMP_STD_PAL ? dimensions >= 2 : transform))
+        RETERROR("eq=2 needs a transform separation");
 
     int level = vsapi->mapGetIntSaturated(in, "level", 0, &err);
     if (err)
@@ -504,12 +504,12 @@ static void VS_CC comp_restore_create(const VSMap *in, VSMap *out, void *user_da
     if (level && dimensions < 2)
         RETERROR("level=1 needs dimensions 2 or 3");
     if (level && d.standard == COMP_STD_NTSC && !transform)
-        RETERROR("level=1 needs transform=1 for ntsc");
+        RETERROR("level=1 needs a transform separation for ntsc");
 
     const int nlut = vsapi->mapNumElements(in, "lut");
     if (nlut > 0) {
-        if (d.standard != COMP_STD_PAL)
-            RETERROR("lut is Transform PAL only");
+        if (d.standard == COMP_STD_NTSC && !transform)
+            RETERROR("lut needs a transform separation");
         if (level)
             RETERROR("lut and level are mutually exclusive");
         if (dimensions == 2 && nlut != COMP_T2D_NTHRESH * COMP_LUT_K)
@@ -606,8 +606,8 @@ static void VS_CC comp_restore_create(const VSMap *in, VSMap *out, void *user_da
 
     const int nthresh = vsapi->mapNumElements(in, "thresholds");
     if (nthresh > 0) {
-        if (d.standard != COMP_STD_PAL)
-            RETERROR("thresholds is Transform PAL only");
+        if (d.standard == COMP_STD_NTSC && !transform)
+            RETERROR("thresholds needs a transform separation for ntsc");
         if (level)
             RETERROR("thresholds needs the threshold mode (level=0)");
         if (dimensions == 2 && nthresh != COMP_T2D_NTHRESH)

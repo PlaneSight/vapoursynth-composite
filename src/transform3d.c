@@ -201,11 +201,15 @@ static inline float dist_sq3(float a, float b, float c)
  * frequency-shaped threshold (lenient near the chroma carrier at
  * (fsc, 120 c/aph, 15 Hz), strict near luma) and cross-checks each
  * candidate against the energy at its demodulated-luma positions k±c
- * (chroma with no corresponding luma is suspect). */
-static void apply_filter_ntsc(const comp_transform3d_t *t,
-                              const fftwf_complex *in, fftwf_complex *out)
+ * (chroma with no corresponding luma is suspect). A trained LUT
+ * replaces both devices — the per-bin gains learn the frequency
+ * dependence directly — so the luma-evidence test is not applied in
+ * LUT mode. Returns the tile's chroma confidence as apply_filter does. */
+static float apply_filter_ntsc(const comp_transform3d_t *t,
+                               const fftwf_complex *in, fftwf_complex *out)
 {
     const float *tsq = t->threshold_sq;
+    float conf_num = 0.0f, conf_den = 0.0f;
 
     memset(out, 0, sizeof(fftwf_complex) * TILE_CPLX);
 
@@ -269,6 +273,8 @@ static void apply_filter_ntsc(const comp_transform3d_t *t,
                         /* its own reflection and a carrier: keep */
                         bo[x][0] = bi[x][0];
                         bo[x][1] = bi[x][1];
+                        conf_num += bi[x][0] * bi[x][0] + bi[x][1] * bi[x][1];
+                        conf_den += bi[x][0] * bi[x][0] + bi[x][1] * bi[x][1];
                         continue;
                     }
                     if (((y == 0 || y == YTILE / 2) && (z == 0 || z == ZTILE / 2))
@@ -282,10 +288,26 @@ static void apply_filter_ntsc(const comp_transform3d_t *t,
                 const float m_in = bi[x][0] * bi[x][0] + bi[x][1] * bi[x][1];
                 const float m_ref = bi_ref[x_ref][0] * bi_ref[x_ref][0]
                                   + bi_ref[x_ref][1] * bi_ref[x_ref][1];
+                const float lo = m_in < m_ref ? m_in : m_ref;
+                const float m_max = m_in > m_ref ? m_in : m_ref;
+                const float r = m_max > 0.0f ? lo / m_max : 1.0f;
+
+                if (t->use_lut) {
+                    const int bin = (int)(tsq - t->threshold_sq) - 1;
+                    const float g = lut_gain(t->lut[bin], lo, m_max);
+                    bo[x][0] = bi[x][0] * g;
+                    bo[x][1] = bi[x][1] * g;
+                    bo_ref[x_ref][0] = bi_ref[x_ref][0] * g;
+                    bo_ref[x_ref][1] = bi_ref[x_ref][1] * g;
+                    const float e = g * g * (m_in + m_ref);
+                    conf_num += e * r;
+                    conf_den += e;
+                    continue;
+                }
+
                 const float l1 = (*lr1)[0] * (*lr1)[0] + (*lr1)[1] * (*lr1)[1];
                 const float l2 = (*lr2)[0] * (*lr2)[0] + (*lr2)[1] * (*lr2)[1];
                 const float m_luma = l1 > l2 ? l1 : l2;
-                const float m_max = m_in > m_ref ? m_in : m_ref;
 
                 if (t->level) {
                     /* the reference's levelMode: discard the pair when
@@ -303,6 +325,9 @@ static void apply_filter_ntsc(const comp_transform3d_t *t,
                     bo[x][1] = bi[x][1] * f_in;
                     bo_ref[x_ref][0] = bi_ref[x_ref][0] * f_ref;
                     bo_ref[x_ref][1] = bi_ref[x_ref][1] * f_ref;
+                    const float e = f_in * f_in * m_in + f_ref * f_ref * m_ref;
+                    conf_num += e * r;
+                    conf_den += e;
                     continue;
                 }
 
@@ -321,9 +346,13 @@ static void apply_filter_ntsc(const comp_transform3d_t *t,
                 bo[x][1] = bi[x][1];
                 bo_ref[x_ref][0] = bi_ref[x_ref][0];
                 bo_ref[x_ref][1] = bi_ref[x_ref][1];
+                conf_num += (m_in + m_ref) * r;
+                conf_den += m_in + m_ref;
             }
         }
     }
+
+    return conf_den > 0.0f ? conf_num / conf_den : 0.0f;
 }
 
 void comp_transform3d_frame(const comp_transform3d_t *t,
@@ -384,11 +413,9 @@ void comp_transform3d_frame(const comp_transform3d_t *t,
                 }
                 fftwf_execute_dft_r2c(t->forward, real, cplx_in);
 
-                float w = 0.0f;
-                if (t->standard == COMP_STD_PAL)
-                    w = apply_filter(t, cplx_in, cplx_out);
-                else
-                    apply_filter_ntsc(t, cplx_in, cplx_out);
+                const float w = t->standard == COMP_STD_PAL
+                    ? apply_filter(t, cplx_in, cplx_out)
+                    : apply_filter_ntsc(t, cplx_in, cplx_out);
 
                 fftwf_execute_dft_c2r(t->inverse, cplx_out, real);
 

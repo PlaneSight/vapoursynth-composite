@@ -276,7 +276,7 @@ for pl, want in enumerate((32128, 40960, 28672)):
     worst = max(abs(v - want) for v in vals)
     assert worst <= 96, ('ntsc-transform3d-level', pl, want, worst)
 for bad_kw, needle in ((dict(level=1, dimensions=1), 'dimensions 2 or 3'),
-                       (dict(level=1, standard='ntsc', dimensions=3), 'transform=1'),
+                       (dict(level=1, standard='ntsc', dimensions=3), 'transform separation'),
                        (dict(level=1, thresholds=[0.4] * 80), 'level=0')):
     try:
         core.composite.Decode(core.composite.Encode(bff, standard='ntsc')
@@ -309,14 +309,29 @@ for bad_kw, needle in ((dict(lut=[1.0] * 100), '1280'),
         assert needle in str(e), (needle, str(e))
     else:
         assert False, f'expected error: {needle}'
+ntf_lut = core.composite.Decode(core.composite.Encode(bff9, standard='ntsc'),
+                                standard='ntsc', dimensions=3, transform=1,
+                                lut=[1.0] * 12288)
+ntf_lut.get_frame(4)
 try:
     core.composite.Decode(core.composite.Encode(bff, standard='ntsc'),
-                          standard='ntsc', dimensions=3, transform=1,
-                          lut=[1.0] * 12288)
+                          standard='ntsc', dimensions=3, lut=[1.0] * 12288)
 except vs.Error as e:
-    assert 'Transform PAL only' in str(e)
+    assert 'transform separation' in str(e)
 else:
-    assert False, 'lut accepted for ntsc'
+    assert False, 'lut accepted for the ntsc comb'
+# per-bin t0 values feed the ntsc shaped threshold (transform only)
+core.composite.Decode(core.composite.Encode(bff9, standard='ntsc'),
+                      standard='ntsc', dimensions=3, transform=1,
+                      thresholds=[0.4] * 768).get_frame(4)
+try:
+    core.composite.Decode(core.composite.Encode(bff, standard='ntsc'),
+                          standard='ntsc', dimensions=3,
+                          thresholds=[0.4] * 768)
+except vs.Error as e:
+    assert 'transform separation' in str(e)
+else:
+    assert False, 'thresholds accepted for the ntsc comb'
 
 # ---- leak-aware eq: works on PAL transforms, differs from eq=1
 eq2 = core.composite.Decode(enc_t, eq=2)
@@ -327,10 +342,14 @@ for pl, want in enumerate((30000, 40960, 28672)):
     assert worst <= 96, ('pal2d-eq2', pl, want, worst)
 core.composite.Decode(enc_t, eq=2, dimensions=3).get_frame(0)
 core.composite.Restore(tex, eq=2).get_frame(0)
+core.composite.Decode(core.composite.Encode(bff9, standard='ntsc'),
+                      standard='ntsc', dimensions=3, transform=1,
+                      eq=2).get_frame(4)
+
 for bad_kw, needle in ((dict(eq=3), 'eq must be'),
-                       (dict(eq=2, dimensions=1), 'dimensions 2 or 3'),
+                       (dict(eq=2, dimensions=1), 'transform separation'),
                        (dict(eq=2, standard='ntsc', dimensions=3),
-                        'pal transform')):
+                        'transform separation')):
     try:
         core.composite.Decode(core.composite.Encode(bff, standard='ntsc')
                               if bad_kw.get('standard') == 'ntsc' else enc_t,

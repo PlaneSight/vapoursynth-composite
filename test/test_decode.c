@@ -135,6 +135,7 @@ static void test_3d_roundtrip(int standard, int use_transform, int level)
     CHECK(comp_decode_init(&dec, standard, 0.4, 1, 0, 3, 0, 0, use_transform, level) == 0, "3d decode init");
     const int look = comp_decode_look(&dec);
     CHECK(look == ((pal || use_transform) ? 3 : 1), "3d look");
+    (void)look;
 
     for (int r = 0; r < rows; r++) {
         for (int x = 0; x < w; x++) {
@@ -204,6 +205,7 @@ static void test_3d_roundtrip(int standard, int use_transform, int level)
     /* the transform's luma-evidence test degrades more at the black
      * temporal padding than the comb does */
     CHECK(edge_y <= (use_transform ? 1024 : 512), "3d edge Y error %d too large", edge_y);
+    (void)0;
     CHECK(edge_u <= 2048, "3d edge U error %d too large", edge_u);
     CHECK(edge_v <= 2048, "3d edge V error %d too large", edge_v);
 
@@ -498,8 +500,13 @@ static void test_lut(void)
     comp_decode_t dec_n;
     CHECK(comp_decode_init(&dec_n, COMP_STD_NTSC, 0.4, 1, 0, 3, 0, 0, 1, 0) == 0,
           "ntsc transform init");
+    CHECK(comp_decode_set_lut(&dec_n, ones, COMP_T3D_NTHRESH * COMP_LUT_K) == 0,
+          "lut on the ntsc transform must be accepted");
+    comp_decode_free(&dec_n);
+    CHECK(comp_decode_init(&dec_n, COMP_STD_NTSC, 0.4, 1, 0, 3, 0, 0, 0, 0) == 0,
+          "ntsc comb init");
     CHECK(comp_decode_set_lut(&dec_n, ones, COMP_T3D_NTHRESH * COMP_LUT_K) != 0,
-          "lut on ntsc must be rejected");
+          "lut on the ntsc comb must be rejected");
     comp_decode_free(&dec_n);
 }
 

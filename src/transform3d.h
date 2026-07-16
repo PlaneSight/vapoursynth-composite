@@ -53,7 +53,8 @@ int comp_transform3d_init(comp_transform3d_t *t, double threshold, int standard,
 void comp_transform3d_free(comp_transform3d_t *t);
 
 /* install a trained per-bin soft-gain LUT (COMP_T3D_NTHRESH * COMP_LUT_K
- * values in [0,1], knots innermost), replacing the pair test; PAL only */
+ * values in [0,1], knots innermost), replacing the pair test (and, for
+ * NTSC, the shaped threshold and luma-evidence test) */
 void comp_transform3d_set_lut(comp_transform3d_t *t, const double *v);
 
 /* Extract the chroma of the two fields of output frame `frame`.
@@ -63,8 +64,8 @@ void comp_transform3d_set_lut(comp_transform3d_t *t, const double *v);
  * 0 for PAL; NTSC's first field sits on odd rows at row offsets 0/4 and
  * even rows at offset 5. chroma0/chroma1 are the row-parity field
  * buffers matching the raster layout. conf0/conf1, when non-NULL,
- * receive [0,1] chroma-confidence maps (PAL only; same layout and
- * stride as the chroma buffers). */
+ * receive [0,1] chroma-confidence maps (same layout and stride as the
+ * chroma buffers). */
 void comp_transform3d_frame(const comp_transform3d_t *t,
                             const comp_field_view_t *fields, int z0, int nfields,
                             int frame, int parity, int width, int field_rows,

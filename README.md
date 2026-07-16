@@ -34,11 +34,12 @@ Alpha. PAL and NTSC round trips work:
   (default 1) applies a chroma equalizer that inverts the known
   encode+decode filter cascade, sharpening recovered color; disable it
   for content that is essentially monochrome, where it can amplify
-  chroma leakage instead — or use `eq=2` (PAL transforms only), which
-  scales the boost per sample by the transform's own pair-symmetry
-  confidence: it keeps most of the sharpening on real color while
-  cutting most of the leak amplification, the right choice when the
-  content is unknown or mixed. `dimensions=1` is a deliberately crude notch
+  chroma leakage instead — or use `eq=2` (PAL transforms and Transform
+  NTSC), which scales the boost per sample by the transform's own
+  pair-symmetry confidence: it keeps most of the sharpening on real
+  color while cutting most of the leak amplification, the right choice
+  when the content is unknown or mixed.
+  `dimensions=1` is a deliberately crude notch
   decoder, useful as a worst-case reference and as the degradation model
   of `Restore`. `thresholds` overrides the Transform PAL bin-symmetry
   test per frequency bin (80 values for dimensions=2, 768 for 3);
@@ -52,14 +53,15 @@ Alpha. PAL and NTSC round trips work:
   measurably better on moving content and on real footage, at the cost
   of a slightly softer separation on static synthetic detail;
   `threshold`/`thresholds` are unused in this mode. `lut` installs a
-  trained soft separation (Transform PAL only): per frequency bin, a
-  gain over the pair-symmetry ratio — 16 knots per bin, linearly
+  trained soft separation (transform separations only): per frequency
+  bin, a gain over the pair-symmetry ratio — 16 knots per bin, linearly
   interpolated, so 1280 values for dimensions=2 and 12288 for 3 —
-  replacing the keep/discard test entirely (after US 7,872,689).
-  test/calibrate_thresholds.py derives the table from a clean corpus in
-  closed form (per-cell Wiener gains from encoder-linearity energy
-  labels); test/lut_pal_2d.txt is a set trained on the VQEG 625-line
-  corpus.
+  replacing the keep/discard test entirely (after US 7,872,689; for
+  Transform NTSC it also replaces the shaped threshold and
+  luma-evidence test). test/calibrate_thresholds.py derives the table
+  from a clean corpus in closed form (per-cell Wiener gains from
+  encoder-linearity energy labels); test/lut_pal_2d.txt is a set
+  trained on the VQEG 625-line corpus.
 - `composite.Restore(clip[, standard, width, threshold, setup, dimensions, eq, refine, thresholds, precomb, transform, level, lut])`
   — the whole noise-reduction round trip in one call. `refine` (default
   1) runs that many analysis-by-synthesis iterations that deconvolve a
