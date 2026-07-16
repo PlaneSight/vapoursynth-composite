@@ -18,6 +18,7 @@
 #include <pthread.h>
 #include <string.h>
 
+#include "osdep.h"
 #include "subcarrier.h"
 #include "transform3d.h"
 
@@ -61,13 +62,13 @@ int comp_transform3d_init(comp_transform3d_t *t, double threshold, int standard,
                                              * compute_window(y, YTILE)
                                              * compute_window(x, XTILE));
 
-    float real[TILE_REAL];
-    fftwf_complex cplx[TILE_CPLX];
+    ALIGNED_32( float real[TILE_REAL] );
+    ALIGNED_32( fftwf_complex cplx[TILE_CPLX] );
     pthread_mutex_lock(&planner_lock);
     t->forward = fftwf_plan_dft_r2c_3d(ZTILE, YTILE, XTILE, real, cplx,
-                                       FFTW_ESTIMATE | FFTW_UNALIGNED);
+                                       FFTW_MEASURE);
     t->inverse = fftwf_plan_dft_c2r_3d(ZTILE, YTILE, XTILE, cplx, real,
-                                       FFTW_ESTIMATE | FFTW_UNALIGNED);
+                                       FFTW_MEASURE);
     pthread_mutex_unlock(&planner_lock);
     if (!t->forward || !t->inverse) {
         comp_transform3d_free(t);
@@ -390,9 +391,9 @@ void comp_transform3d_frame(const comp_transform3d_t *t,
                             float *chroma0, float *chroma1, ptrdiff_t chroma_stride,
                             float *conf0, float *conf1)
 {
-    float real[TILE_REAL];
-    fftwf_complex cplx_in[TILE_CPLX];
-    fftwf_complex cplx_out[TILE_CPLX];
+    ALIGNED_32( float real[TILE_REAL] );
+    ALIGNED_32( fftwf_complex cplx_in[TILE_CPLX] );
+    ALIGNED_32( fftwf_complex cplx_out[TILE_CPLX] );
     float *chroma[2] = { chroma0, chroma1 };
     float *conf[2] = { conf0, conf1 };
     const int fout = frame * 2;

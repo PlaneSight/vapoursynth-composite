@@ -13,6 +13,7 @@
 #include <pthread.h>
 #include <string.h>
 
+#include "osdep.h"
 #include "transform2d.h"
 
 #ifndef M_PI
@@ -51,15 +52,16 @@ int comp_transform2d_init(comp_transform2d_t *t, double threshold, int level,
         for (int x = 0; x < XTILE; x++)
             t->window[y][x] = (float)(compute_window(y, YTILE) * compute_window(x, XTILE));
 
-    /* FFTW_UNALIGNED lets per-call tile buffers live on the stack, which
-     * keeps frame processing allocation-free under fmParallel */
-    float real[YTILE * XTILE];
-    fftwf_complex cplx[YCOMPLEX * XCOMPLEX];
+    /* Per-call tile buffers live on the stack, keeping frame processing
+     * allocation-free under fmParallel; ALIGNED_32 matches the
+     * alignment planned here so FFTW's SIMD codelets stay eligible */
+    ALIGNED_32( float real[YTILE * XTILE] );
+    ALIGNED_32( fftwf_complex cplx[YCOMPLEX * XCOMPLEX] );
     pthread_mutex_lock(&planner_lock);
     t->forward = fftwf_plan_dft_r2c_2d(YTILE, XTILE, real, cplx,
-                                       FFTW_ESTIMATE | FFTW_UNALIGNED);
+                                       FFTW_MEASURE);
     t->inverse = fftwf_plan_dft_c2r_2d(YTILE, XTILE, cplx, real,
-                                       FFTW_ESTIMATE | FFTW_UNALIGNED);
+                                       FFTW_MEASURE);
     pthread_mutex_unlock(&planner_lock);
     if (!t->forward || !t->inverse) {
         comp_transform2d_free(t);
@@ -220,9 +222,9 @@ void comp_transform2d_field(const comp_transform2d_t *t,
                             float *chroma, ptrdiff_t chroma_stride,
                             float *conf, ptrdiff_t conf_stride)
 {
-    float real[YTILE * XTILE];
-    fftwf_complex cplx_in[YCOMPLEX * XCOMPLEX];
-    fftwf_complex cplx_out[YCOMPLEX * XCOMPLEX];
+    ALIGNED_32( float real[YTILE * XTILE] );
+    ALIGNED_32( fftwf_complex cplx_in[YCOMPLEX * XCOMPLEX] );
+    ALIGNED_32( fftwf_complex cplx_out[YCOMPLEX * XCOMPLEX] );
 
     for (int r = 0; r < rows; r++) {
         memset(chroma + r * chroma_stride, 0, sizeof(float) * width);
