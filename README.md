@@ -63,8 +63,10 @@ Alpha. PAL and NTSC round trips work:
   Transform NTSC it also replaces the shaped threshold and
   luma-evidence test). test/calibrate_thresholds.py derives the table
   from a clean corpus in closed form (per-cell Wiener gains from
-  encoder-linearity energy labels); test/lut_pal_2d.txt is a set
-  trained on the VQEG 625-line corpus.
+  encoder-linearity energy labels); test/lut_pal_{2d,3d}.txt and
+  test/lut_ntsc.txt are sets trained on the VQEG 625/525-line corpora,
+  and its ntsc mode also emits calibrated per-bin t0 values for the
+  shaped threshold (test/thresholds_ntsc.txt).
 - `composite.Restore(clip[, standard, width, threshold, setup, dimensions, eq, refine, thresholds, precomb, transform, level, lut])`
   — the whole noise-reduction round trip in one call. `refine` (default
   1) runs that many analysis-by-synthesis iterations that deconvolve a

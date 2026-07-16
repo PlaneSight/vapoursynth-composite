@@ -14,7 +14,10 @@
 # L*g^2 + alpha*C*(1-g)^2 is the Wiener gain alpha*C / (L + alpha*C) —
 # closed form, no iteration.
 #
-# usage: calibrate_thresholds.py composite.so corpus_dir [frames_per_clip] [2d|3d]
+# usage: calibrate_thresholds.py composite.so corpus_dir [frames_per_clip] [2d|3d|ntsc]
+# 2d/3d calibrate Transform PAL on the 625-line corpus; ntsc calibrates
+# Transform NTSC 3D on the 525-line corpus (per-bin t0 values for the
+# shaped threshold, by inverting the shaping, plus the soft LUT).
 
 import glob
 import os
@@ -41,7 +44,10 @@ BIN_X3 = list(range(X3 // 8, X3 // 4 + 1))
 NBINS = (YTILE * len(BIN_X)) if MODE == '2d' else (Z3 * Y3 * len(BIN_X3))
 ALPHA = 2.0
 RBUCKETS = 200
-H, WR = 576, 928
+STANDARD = 'ntsc' if MODE == 'ntsc' else 'pal'
+H, WR = (486, 758) if MODE == 'ntsc' else (576, 928)
+# 3D reflection offsets and the raster parity of even (first) fields
+ZOFF, YOFF, PARITY = (Z3 // 2, Y3 // 2, 1) if MODE == 'ntsc' else (Z3 // 4, Y3 // 4, 0)
 
 
 def gray_clip(arr):
@@ -59,7 +65,7 @@ def gray_clip(arr):
 
 def load_frames(path, count):
     # 2D can sample scattered frames; 3D needs consecutive fields
-    vf = ('select=gte(n\\,80),' if MODE == '3d' else 'select=not(mod(n\\,40)),') \
+    vf = ('select=not(mod(n\\,40)),' if MODE == '2d' else 'select=gte(n\\,80),') \
          + 'format=yuv444p16le'
     r = subprocess.run([metrics.FFMPEG or 'ffmpeg', '-v', 'error', '-i', path,
                         '-vf', vf, '-frames:v', str(count), '-f', 'rawvideo', '-'],
@@ -70,7 +76,7 @@ def load_frames(path, count):
 
 
 def encode(arr):
-    return to_array(core.composite.Encode(clip_from(arr), standard='pal'))
+    return to_array(core.composite.Encode(clip_from(arr), standard=STANDARD))
 
 
 def tile_stats(comp_nr, comp_lum, comp_chr, hist_lum, hist_chr):
@@ -115,7 +121,7 @@ def tile_stats_3d(comp_nr, comp_lum, comp_chr, hist_lum, hist_chr):
 
     win = window(Z3)[:, None, None] * window(Y3)[None, :, None] * window(X3)[None, None, :]
     refs = [(z, y, x,
-             ((Z3 // 4) + Z3 - z) % Z3, ((Y3 // 4) + Y3 - y) % Y3, X3 // 2 - x)
+             (ZOFF + Z3 - z) % Z3, (YOFF + Y3 - y) % Y3, X3 // 2 - x)
             for z in range(Z3) for y in range(Y3) for x in BIN_X3]
 
     nfields = comp_nr.shape[0] * 2
@@ -132,7 +138,7 @@ def tile_stats_3d(comp_nr, comp_lum, comp_chr, hist_lum, hist_chr):
             f = field(c, g)
             for y in range(Y3):
                 fl = ty + y
-                if 0 <= fl < H and (fl & 1) == (g & 1):
+                if 0 <= fl < H and ((fl + PARITY) & 1) == (g & 1):
                     t[z, y] = f[fl >> 1, tx:tx + X3]
         return t * win
 
@@ -176,9 +182,39 @@ def wiener_lut(hist_lum, hist_chr, alpha):
     return np.clip(lut, 0.0, 1.0)
 
 
+def ntsc_shaped_bases():
+    # base = k_chroma/(k_luma+k_chroma) per bin, with the runtime's
+    # interlace diamond mapping; the shaped threshold is base**(10*t0^2)
+    bases = []
+    for z in range(Z3):
+        kz0 = z / Z3
+        for y in range(Y3):
+            ky0 = y / Y3
+            ky, kz = ky0, kz0
+            if kz0 + ky0 < 0.5:
+                kz, ky = kz0 + 0.5, ky0 + 0.5
+            elif kz0 + ky0 > 1.5:
+                kz, ky = kz0 - 0.5, ky0 - 0.5
+            elif kz0 - ky0 > 0.5:
+                kz, ky = kz0 - 0.5, ky0 + 0.5
+            elif ky0 - kz0 > 0.5:
+                kz, ky = kz0 + 0.5, ky0 - 0.5
+            if kz + ky > 1.0:
+                kz, ky = 1.0 - kz, 1.0 - ky
+            for x in BIN_X3:
+                kx = x / X3
+                k_luma = (kz - 0.5) ** 2 + (ky - 0.5) ** 2 + kx ** 2
+                k_chroma = (kz - 0.25) ** 2 + (ky - 0.25) ** 2 + (kx - 0.25) ** 2
+                bases.append(k_chroma / (k_luma + k_chroma))
+    return np.array(bases)
+
+
 def optimal_thresholds(hist_lum, hist_chr, alpha):
-    # keep iff r >= t^2: cost(t) = kept luma + alpha * discarded chroma
+    # keep iff r >= cut: cost(cut) = kept luma + alpha * discarded chroma.
+    # PAL: cut = t^2, report t. NTSC: cut = base**(10*t0^2), report t0
+    # (the luma-evidence tightening is ignored here).
     th = np.full(NBINS, 0.4)
+    bases = ntsc_shaped_bases() if MODE == 'ntsc' else None
     for b in range(NBINS):
         lum, chr_ = hist_lum[b], hist_chr[b]
         # cost when the cut is placed before bucket k (keep buckets >= k)
@@ -186,19 +222,28 @@ def optimal_thresholds(hist_lum, hist_chr, alpha):
         lost_chr = np.concatenate(([0.0], np.cumsum(chr_)))
         cost = kept_lum + alpha * lost_chr
         k = int(np.argmin(cost))
-        th[b] = np.sqrt(max(k, 0) / RBUCKETS)
+        cut = max(k, 0) / RBUCKETS
+        if MODE == 'ntsc':
+            if cut <= 0.0:
+                th[b] = 0.999          # keep everything: huge exponent
+            elif bases[b] >= 1.0 or cut >= 1.0:
+                th[b] = 0.05
+            else:
+                th[b] = np.sqrt(np.log(cut) / (10.0 * np.log(bases[b])))
+        else:
+            th[b] = np.sqrt(cut)
     return np.clip(th, 0.05, 0.999)
 
 
 def evaluate(name, comp_nr, clean, **kw):
-    out = to_array(core.composite.Decode(gray_clip(comp_nr), standard='pal', **kw))
+    out = to_array(core.composite.Decode(gray_clip(comp_nr), standard=STANDARD, **kw))
     res = score(out, clean)
     print(f"  {name:18s} PSNR Y {res['psnr_Y']:6.2f}  U {res['psnr_U']:6.2f}  "
           f"V {res['psnr_V']:6.2f}   chromaHF {res['chf']:7.1f}  flicker {res['flick']:7.1f}")
 
 
-clips = sorted(glob.glob(os.path.join(CORPUS, '*625*.y4m')))
-assert clips, 'no 625-line clips found'
+clips = sorted(glob.glob(os.path.join(CORPUS, f"*{'525' if MODE == 'ntsc' else '625'}*.y4m")))
+assert clips, 'no corpus clips found'
 train, held = clips[:-3], clips[-3:]
 print(f'{len(train)} training clips, {len(held)} held out; {FRAMES} frames each')
 
@@ -214,7 +259,7 @@ for path in train:
     chr_only[:, 0] = 32128
 
     comp = encode(clean)
-    degraded = to_array(raster_to_601(bad_decode(comp, 'pal', 0), 'pal', H))
+    degraded = to_array(raster_to_601(bad_decode(comp, STANDARD, 0), STANDARD, H))
     comp_nr = encode(degraded)
     stats = tile_stats if MODE == '2d' else tile_stats_3d
     stats(comp_nr, encode(lum_only), encode(chr_only), hist_lum, hist_chr)
@@ -229,26 +274,35 @@ if MODE == '2d':
     for y in range(YTILE):
         print('  ' + ' '.join(f'{v:.3f}' for v in th[y * len(BIN_X):(y + 1) * len(BIN_X)]))
 else:
-    print(f'\ncalibrated 3D thresholds, alpha={ALPHA}: '
+    print(f'\ncalibrated 3D {"t0" if MODE == "ntsc" else "thresholds"}, alpha={ALPHA}: '
           f'min {th.min():.3f} max {th.max():.3f} mean {th.mean():.3f}')
 
 print('\nvalidation (held-out clips):')
 for path in held:
     clean = load_frames(path, FRAMES)
     comp = encode(clean)
-    degraded = to_array(raster_to_601(bad_decode(comp, 'pal', 0), 'pal', H))
+    degraded = to_array(raster_to_601(bad_decode(comp, STANDARD, 0), STANDARD, H))
     comp_nr = encode(degraded)
     print(os.path.basename(path) + ':')
     dims = 2 if MODE == '2d' else 3
-    evaluate('uniform 0.4', comp_nr, clean, dimensions=dims)
-    evaluate('uniform 0.7', comp_nr, clean, dimensions=dims, threshold=0.7)
-    evaluate('level', comp_nr, clean, dimensions=dims, level=1)
+    tf = dict(transform=1) if MODE == 'ntsc' else {}
+    evaluate('uniform 0.4', comp_nr, clean, dimensions=dims, **tf)
+    evaluate('uniform 0.7', comp_nr, clean, dimensions=dims, threshold=0.7, **tf)
+    evaluate('level', comp_nr, clean, dimensions=dims, level=1, **tf)
+    if MODE == 'ntsc':
+        evaluate('comb 3D', comp_nr, clean, dimensions=3)
+        evaluate('hybrid', comp_nr, clean, dimensions=3, transform=2)
     for a, tha in cands.items():
-        evaluate(f'calibrated a={a}', comp_nr, clean, dimensions=dims, thresholds=list(tha))
+        evaluate(f'calibrated a={a}', comp_nr, clean, dimensions=dims,
+                 thresholds=list(tha), **tf)
     for a, la in luts.items():
-        evaluate(f'lut a={a}', comp_nr, clean, dimensions=dims, lut=list(la.ravel()))
+        evaluate(f'lut a={a}', comp_nr, clean, dimensions=dims,
+                 lut=list(la.ravel()), **tf)
 
-np.savetxt(f'thresholds_pal_{MODE}.txt', th, fmt='%.4f')
-np.savetxt(f'lut_pal_{MODE}.txt', luts[ALPHA].ravel(), fmt='%.4f')
-print(f'\nsaved thresholds_pal_{MODE}.txt, lut_pal_{MODE}.txt (alpha={ALPHA}) '
+prefix = 'ntsc' if MODE == 'ntsc' else f'pal_{MODE}'
+np.savetxt(f'thresholds_{prefix}.txt' if MODE == 'ntsc' else f'thresholds_pal_{MODE}.txt',
+           th, fmt='%.4f')
+np.savetxt(f'lut_{prefix}.txt' if MODE == 'ntsc' else f'lut_pal_{MODE}.txt',
+           luts[ALPHA].ravel(), fmt='%.4f')
+print(f'\nsaved calibrated thresholds and lut (alpha={ALPHA}) '
       f'and threshold_hists_{MODE}.npz')
