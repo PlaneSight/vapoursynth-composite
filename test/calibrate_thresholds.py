@@ -14,10 +14,15 @@
 # L*g^2 + alpha*C*(1-g)^2 is the Wiener gain alpha*C / (L + alpha*C) —
 # closed form, no iteration.
 #
-# usage: calibrate_thresholds.py composite.so corpus_dir [frames_per_clip] [2d|3d|ntsc]
+# usage: calibrate_thresholds.py composite.so corpus_dirs [frames_per_clip] [2d|3d|ntsc]
 # 2d/3d calibrate Transform PAL on the 625-line corpus; ntsc calibrates
 # Transform NTSC 3D on the 525-line corpus (per-bin t0 values for the
 # shaped threshold, by inverting the shaping, plus the soft LUT).
+# corpus_dirs is a colon-separated directory list; the last 3 clips of
+# each directory are held out for validation. Clips may mix 486-line
+# (full raster, assumed BFF) and 480-line material; 480-line clips are
+# placed on the raster per their y4m interlacing flag (TFF at row 5,
+# else row 4), matching Encode's _FieldBased handling.
 
 import glob
 import os
@@ -46,11 +51,26 @@ ALPHA = 2.0
 RBUCKETS = 200
 STANDARD = 'ntsc' if MODE == 'ntsc' else 'pal'
 H, WR = (486, 758) if MODE == 'ntsc' else (576, 928)
-# 3D reflection offsets and the raster parity of even (first) fields
-ZOFF, YOFF, PARITY = (Z3 // 2, Y3 // 2, 1) if MODE == 'ntsc' else (Z3 // 4, Y3 // 4, 0)
+# 3D reflection offsets; the raster parity of even (temporally first)
+# fields depends on each clip's raster placement for NTSC
+ZOFF, YOFF = (Z3 // 2, Y3 // 2) if MODE == 'ntsc' else (Z3 // 4, Y3 // 4)
+PARITY = 0  # PAL; NTSC clips carry their own parity in geom()
 
 
-def gray_clip(arr):
+def geom(path):
+    # per-clip geometry from the y4m header: (rows, row_off, parity, tff)
+    with open(path, 'rb') as f:
+        hdr = f.readline().decode('ascii', 'replace')
+    h = int([t for t in hdr.split() if t.startswith('H')][0][1:])
+    tff = ' It' in hdr
+    if STANDARD == 'pal' or h == 486:
+        return h, 0, (0 if STANDARD == 'pal' else 1), False
+    assert h == 480, (path, h)
+    row_off = 5 if tff else 4
+    return h, row_off, (row_off + 1) & 1, tff
+
+
+def gray_clip(arr, tff=False):
     n, h, w = arr.shape
     base = core.std.BlankClip(format=vs.GRAY16, width=w, height=h, length=n,
                               fpsnum=25, fpsden=1)
@@ -60,10 +80,11 @@ def gray_clip(arr):
         np.asarray(fout[0])[:] = arr[n]
         return fout
 
-    return core.std.ModifyFrame(base, base, fill)
+    c = core.std.ModifyFrame(base, base, fill)
+    return core.std.SetFrameProps(c, _FieldBased=2) if tff else c
 
 
-def load_frames(path, count):
+def load_frames(path, count, h):
     # 2D can sample scattered frames; 3D needs consecutive fields
     vf = ('select=not(mod(n\\,40)),' if MODE == '2d' else 'select=gte(n\\,80),') \
          + 'format=yuv444p16le'
@@ -71,12 +92,15 @@ def load_frames(path, count):
                         '-vf', vf, '-frames:v', str(count), '-f', 'rawvideo', '-'],
                        capture_output=True)
     a = np.frombuffer(r.stdout, np.uint16)
-    n = a.size // (3 * H * W601)
-    return a[:n * 3 * H * W601].reshape(n, 3, H, W601).copy()
+    n = a.size // (3 * h * W601)
+    return a[:n * 3 * h * W601].reshape(n, 3, h, W601).copy()
 
 
-def encode(arr):
-    return to_array(core.composite.Encode(clip_from(arr), standard=STANDARD))
+def encode(arr, tff=False):
+    c = clip_from(arr)
+    if tff:
+        c = core.std.SetFrameProps(c, _FieldBased=2)
+    return to_array(core.composite.Encode(c, standard=STANDARD))
 
 
 def tile_stats(comp_nr, comp_lum, comp_chr, hist_lum, hist_chr):
@@ -113,7 +137,10 @@ def tile_stats(comp_nr, comp_lum, comp_chr, hist_lum, hist_chr):
                             b += 1
 
 
-def tile_stats_3d(comp_nr, comp_lum, comp_chr, hist_lum, hist_chr):
+def tile_stats_3d(comp_nr, comp_lum, comp_chr, hist_lum, hist_chr,
+                  rows=None, parity=PARITY):
+    if rows is None:
+        rows = H
     # 3D tiles in frame-line space: rows of the other field are black,
     # exactly as the 3D transform builds them
     def window(nn):
@@ -138,12 +165,12 @@ def tile_stats_3d(comp_nr, comp_lum, comp_chr, hist_lum, hist_chr):
             f = field(c, g)
             for y in range(Y3):
                 fl = ty + y
-                if 0 <= fl < H and ((fl + PARITY) & 1) == (g & 1):
+                if 0 <= fl < rows and ((fl + parity) & 1) == (g & 1):
                     t[z, y] = f[fl >> 1, tx:tx + X3]
         return t * win
 
     for tz in range(0, nfields - Z3 + 1, Z3 // 2):
-        for ty in range(0, H - Y3 + 1, Y3):
+        for ty in range(0, rows - Y3 + 1, Y3):
             for tx in range(16, WR - X3 - 16, X3 * 2):
                 pw = [np.abs(np.fft.rfftn(tile(c, tz, ty, tx))) ** 2
                       for c in (comp_nr, comp_lum, comp_chr)]
@@ -235,20 +262,24 @@ def optimal_thresholds(hist_lum, hist_chr, alpha):
     return np.clip(th, 0.05, 0.999)
 
 
-def evaluate(name, comp_nr, clean, **kw):
+def evaluate(name, comp_nr, clean, tff=False, **kw):
     # the rows compare separation modes at fixed eq/level; the plugin's
     # adaptive defaults would otherwise change what each label means
     kw.setdefault('eq', 1)
     kw.setdefault('level', 0)
-    out = to_array(core.composite.Decode(gray_clip(comp_nr), standard=STANDARD, **kw))
+    out = to_array(core.composite.Decode(gray_clip(comp_nr, tff), standard=STANDARD, **kw))
     res = score(out, clean)
     print(f"  {name:18s} PSNR Y {res['psnr_Y']:6.2f}  U {res['psnr_U']:6.2f}  "
           f"V {res['psnr_V']:6.2f}   chromaHF {res['chf']:7.1f}  flicker {res['flick']:7.1f}")
 
 
-clips = sorted(glob.glob(os.path.join(CORPUS, f"*{'525' if MODE == 'ntsc' else '625'}*.y4m")))
-assert clips, 'no corpus clips found'
-train, held = clips[:-3], clips[-3:]
+pat = f"*{'525' if MODE == 'ntsc' else '625'}*.y4m"
+train, held = [], []
+for d in CORPUS.split(':'):
+    group = sorted(glob.glob(os.path.join(d, pat)))
+    assert group, f'no corpus clips found in {d}'
+    train += group[:-3]
+    held += group[-3:]
 print(f'{len(train)} training clips, {len(held)} held out; {FRAMES} frames each')
 
 hist_lum = np.zeros((NBINS, RBUCKETS))
@@ -256,17 +287,25 @@ hist_chr = np.zeros((NBINS, RBUCKETS))
 flat = np.empty((1, 3, H, W601), np.uint16)
 
 for path in train:
-    clean = load_frames(path, FRAMES)
+    rows, row_off, parity, tff = geom(path)
+    clean = load_frames(path, FRAMES, rows)
+    if clean.shape[0] < FRAMES:
+        print(f'  skipped {os.path.basename(path)} (too short)')
+        continue
     lum_only = clean.copy()
     lum_only[:, 1:] = 32768
     chr_only = clean.copy()
     chr_only[:, 0] = 32128
 
-    comp = encode(clean)
-    degraded = to_array(raster_to_601(bad_decode(comp, STANDARD, 0), STANDARD, H))
-    comp_nr = encode(degraded)
-    stats = tile_stats if MODE == '2d' else tile_stats_3d
-    stats(comp_nr, encode(lum_only), encode(chr_only), hist_lum, hist_chr)
+    comp = encode(clean, tff)
+    degraded = to_array(raster_to_601(bad_decode(comp, STANDARD, row_off), STANDARD, rows))
+    comp_nr = encode(degraded, tff)
+    if MODE == '2d':
+        tile_stats(comp_nr, encode(lum_only, tff), encode(chr_only, tff),
+                   hist_lum, hist_chr)
+    else:
+        tile_stats_3d(comp_nr, encode(lum_only, tff), encode(chr_only, tff),
+                      hist_lum, hist_chr, rows=rows, parity=parity)
     print(f'  trained on {os.path.basename(path)}')
 
 np.savez(f'threshold_hists_{MODE}.npz', lum=hist_lum, chr=hist_chr)
@@ -283,24 +322,28 @@ else:
 
 print('\nvalidation (held-out clips):')
 for path in held:
-    clean = load_frames(path, FRAMES)
-    comp = encode(clean)
-    degraded = to_array(raster_to_601(bad_decode(comp, STANDARD, 0), STANDARD, H))
-    comp_nr = encode(degraded)
+    rows, row_off, parity, tff = geom(path)
+    clean = load_frames(path, FRAMES, rows)
+    if clean.shape[0] < FRAMES:
+        print(f'  skipped {os.path.basename(path)} (too short)')
+        continue
+    comp = encode(clean, tff)
+    degraded = to_array(raster_to_601(bad_decode(comp, STANDARD, row_off), STANDARD, rows))
+    comp_nr = encode(degraded, tff)
     print(os.path.basename(path) + ':')
     dims = 2 if MODE == '2d' else 3
     tf = dict(transform=1) if MODE == 'ntsc' else {}
-    evaluate('uniform 0.4', comp_nr, clean, dimensions=dims, **tf)
-    evaluate('uniform 0.7', comp_nr, clean, dimensions=dims, threshold=0.7, **tf)
-    evaluate('level', comp_nr, clean, dimensions=dims, level=1, **tf)
+    evaluate('uniform 0.4', comp_nr, clean, tff, dimensions=dims, **tf)
+    evaluate('uniform 0.7', comp_nr, clean, tff, dimensions=dims, threshold=0.7, **tf)
+    evaluate('level', comp_nr, clean, tff, dimensions=dims, level=1, **tf)
     if MODE == 'ntsc':
-        evaluate('comb 3D', comp_nr, clean, dimensions=3)
-        evaluate('hybrid', comp_nr, clean, dimensions=3, transform=2)
+        evaluate('comb 3D', comp_nr, clean, tff, dimensions=3, transform=0)
+        evaluate('hybrid', comp_nr, clean, tff, dimensions=3, transform=2)
     for a, tha in cands.items():
-        evaluate(f'calibrated a={a}', comp_nr, clean, dimensions=dims,
+        evaluate(f'calibrated a={a}', comp_nr, clean, tff, dimensions=dims,
                  thresholds=list(tha), **tf)
     for a, la in luts.items():
-        evaluate(f'lut a={a}', comp_nr, clean, dimensions=dims,
+        evaluate(f'lut a={a}', comp_nr, clean, tff, dimensions=dims,
                  lut=list(la.ravel()), **tf)
 
 prefix = 'ntsc' if MODE == 'ntsc' else f'pal_{MODE}'
