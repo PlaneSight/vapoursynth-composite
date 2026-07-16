@@ -185,14 +185,18 @@ assert (crude.width, crude.height, crude.format.id) == (720, 576, vs.YUV444P16)
 
 rest = core.composite.Restore(tex)
 assert (rest.width, rest.height, rest.format.id) == (720, 576, vs.YUV444P16)
-# refine only touches luma: chroma must match the plain round trip
+# refine only touches luma: chroma must match the plain round trip.
+# Restore splices the out-of-raster edge columns from the source, so
+# the comparisons exclude them.
 plain = core.composite.Decode(core.composite.Encode(tex))
-assert bytes(rest.get_frame(0)[1]) == bytes(plain.get_frame(0)[1])
-assert bytes(rest.get_frame(0)[0]) != bytes(plain.get_frame(0)[0])
-# refine=0 Restore is exactly the plain round trip
+def _interior(clip, pl, n=0):
+    return np.asarray(clip.get_frame(n)[pl])[:, 8:-8].tobytes()
+assert _interior(rest, 1) == _interior(plain, 1)
+assert _interior(rest, 0) != _interior(plain, 0)
+# refine=0 Restore is exactly the plain round trip (interior)
 rest0 = core.composite.Restore(tex, refine=0)
 for pl in range(3):
-    assert bytes(rest0.get_frame(0)[pl]) == bytes(plain.get_frame(0)[pl])
+    assert _interior(rest0, pl) == _interior(plain, pl)
 # NTSC Restore with field-order detection
 rest_n = core.composite.Restore(bff, standard='ntsc', dimensions=3)
 assert (rest_n.width, rest_n.height) == (720, 480)
@@ -386,6 +390,24 @@ for bad_kw, needle in ((dict(evidence=-1.0), '>= 0'),
         assert needle in str(e), (needle, str(e))
     else:
         assert False, f'expected error: {needle}'
+
+# ---- edge padding: out-of-raster columns replicate, never mirror
+# (a blanking-black edge must not reflect bright interior picture)
+edge_row = np.concatenate([np.full(8, 256), np.full(704, 30000),
+                           np.full(8, 256)]).astype(np.uint16)
+edge_arr = np.tile(edge_row, (576, 1))
+eb = core.std.BlankClip(format=vs.YUV444P16, width=720, height=576, length=1,
+                        fpsnum=25, fpsden=1)
+def _efill(n, f):
+    fout = f.copy()
+    np.asarray(fout[0])[:] = edge_arr
+    np.asarray(fout[1])[:] = 32768
+    np.asarray(fout[2])[:] = 32768
+    return fout
+eclip = core.std.ModifyFrame(eb, eb, _efill)
+efr = core.composite.Restore(eclip, refine=0, dimensions=2).get_frame(0)
+ey = np.asarray(efr[0])[200]
+assert ey[:4].max() < 4096 and ey[-4:].max() < 4096,     (ey[:4].tolist(), ey[-4:].tolist())
 
 # ---- cti: sharpens coincident color edges, inert elsewhere
 tex2 = core.std.StackHorizontal([flat([20000, 40960, 28672], w=360),

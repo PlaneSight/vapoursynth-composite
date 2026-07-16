@@ -185,6 +185,66 @@ static int comp_encode_width(int standard)
     return standard == COMP_STD_PAL ? COMP_ACTIVE_WIDTH_PAL : COMP_ACTIVE_WIDTH_NTSC;
 }
 
+
+/* Horizontally pad a node with replicated edge columns. The final
+ * BT.601 resample reads a few samples beyond the active raster (the
+ * 601 window is wider in time), and zimg fills out-of-bounds taps by
+ * MIRRORING, which reflects interior picture onto the frame edges;
+ * replicated padding makes those taps read the edge value instead. */
+#define COMP_EDGE_PAD 24
+
+/* consumes the node reference, also on failure */
+static VSNode *comp_pad_h(VSNode *node, VSCore *core, const VSAPI *vsapi)
+{
+    VSPlugin *std = vsapi->getPluginByID("com.vapoursynth.std", core);
+    VSPlugin *rsz = vsapi->getPluginByID("com.vapoursynth.resize", core);
+    const VSVideoInfo *vi = vsapi->getVideoInfo(node);
+    VSNode *cols[3] = { NULL, node, NULL };
+
+    for (int side = 0; side < 2; side++) {
+        VSMap *args = vsapi->createMap();
+        vsapi->mapSetNode(args, "clip", node, maReplace);
+        vsapi->mapSetInt(args, side ? "left" : "right", vi->width - 1, maReplace);
+        VSMap *ret = vsapi->invoke(std, "Crop", args);
+        vsapi->freeMap(args);
+        if (vsapi->mapGetError(ret)) {
+            vsapi->freeMap(ret);
+            vsapi->freeNode(cols[0]);
+            vsapi->freeNode(node);
+            return NULL;
+        }
+        VSNode *col = vsapi->mapGetNode(ret, "clip", 0, NULL);
+        vsapi->freeMap(ret);
+
+        args = vsapi->createMap();
+        vsapi->mapConsumeNode(args, "clip", col, maReplace);
+        vsapi->mapSetInt(args, "width", COMP_EDGE_PAD, maReplace);
+        ret = vsapi->invoke(rsz, "Point", args);
+        vsapi->freeMap(args);
+        if (vsapi->mapGetError(ret)) {
+            vsapi->freeMap(ret);
+            vsapi->freeNode(cols[0]);
+            vsapi->freeNode(node);
+            return NULL;
+        }
+        cols[side ? 2 : 0] = vsapi->mapGetNode(ret, "clip", 0, NULL);
+        vsapi->freeMap(ret);
+    }
+
+    VSMap *args = vsapi->createMap();
+    for (int i = 0; i < 3; i++)
+        vsapi->mapConsumeNode(args, "clips", cols[i], maAppend);
+    VSMap *ret = vsapi->invoke(std, "StackHorizontal", args);
+    vsapi->freeMap(args);
+    if (vsapi->mapGetError(ret)) {
+        vsapi->freeMap(ret);
+        return NULL;
+    }
+    VSNode *padded = vsapi->mapGetNode(ret, "clip", 0, NULL);
+    vsapi->freeMap(ret);
+    return padded;
+}
+
 static void VS_CC comp_encode_create(const VSMap *in, VSMap *out, void *user_data, VSCore *core, const VSAPI *vsapi)
 {
     const char *name = user_data;
@@ -451,17 +511,23 @@ static void VS_CC comp_decode_create(const VSMap *in, VSMap *out, void *user_dat
 
     /* resample back to the BT.601 raster: the exact inverse of Encode's
      * mapping. The 601 window is wider in time than the active raster,
-     * so the outermost samples come from edge extension. */
+     * so the outermost samples come from replicated edge padding. */
     const int pal = d.standard == COMP_STD_PAL;
     const double rho = pal ? RHO_PAL : RHO_NTSC;
     const double active0 = pal ? 182.0 : 130.0 + 57.0 / 90.0;
     const double anchor601 = pal ? 132.0 : 122.0;
+    VSNode *padded = comp_pad_h(dec_node, core, vsapi);
+    if (!padded) {
+        vsapi->mapSetError(out, "Decode: edge padding failed");
+        return;
+    }
     VSMap *args = vsapi->createMap();
-    vsapi->mapConsumeNode(args, "clip", dec_node, maReplace);
+    vsapi->mapConsumeNode(args, "clip", padded, maReplace);
     vsapi->mapSetInt(args, "width", width, maReplace);
     vsapi->mapSetInt(args, "height", d.vi.height, maReplace);
     vsapi->mapSetFloat(args, "src_left",
-                       anchor601 / rho - (active0 - 0.5) - 0.5 * (720.0 / width) / rho, maReplace);
+                       COMP_EDGE_PAD + anchor601 / rho - (active0 - 0.5)
+                       - 0.5 * (720.0 / width) / rho, maReplace);
     vsapi->mapSetFloat(args, "src_width", 720.0 / rho, maReplace);
     VSMap *ret = vsapi->invoke(resize, "Spline36", args);
     vsapi->freeMap(args);
@@ -616,6 +682,7 @@ static void VS_CC comp_restore_create(const VSMap *in, VSMap *out, void *user_da
     const double anchor601 = pal ? 132.0 : 122.0;
     const double scale = src_width / 720.0;
 
+    VSNode *source = vsapi->addNodeRef(d.node);
     VSMap *args = vsapi->createMap();
     vsapi->mapConsumeNode(args, "clip", d.node, maReplace);
     d.node = NULL;
@@ -728,12 +795,18 @@ static void VS_CC comp_restore_create(const VSMap *in, VSMap *out, void *user_da
     }
 
     /* stage 4: back to the caller's raster */
+    VSNode *padded = comp_pad_h(dec_node, core, vsapi);
+    if (!padded) {
+        vsapi->mapSetError(out, "Restore: edge padding failed");
+        return;
+    }
     args = vsapi->createMap();
-    vsapi->mapConsumeNode(args, "clip", dec_node, maReplace);
+    vsapi->mapConsumeNode(args, "clip", padded, maReplace);
     vsapi->mapSetInt(args, "width", width, maReplace);
     vsapi->mapSetInt(args, "height", d.vi.height, maReplace);
     vsapi->mapSetFloat(args, "src_left",
-                       anchor601 / rho - (active0 - 0.5) - 0.5 * (720.0 / width) / rho, maReplace);
+                       COMP_EDGE_PAD + anchor601 / rho - (active0 - 0.5)
+                       - 0.5 * (720.0 / width) / rho, maReplace);
     vsapi->mapSetFloat(args, "src_width", 720.0 / rho, maReplace);
     ret = vsapi->invoke(resize, "Spline36", args);
     vsapi->freeMap(args);
@@ -744,10 +817,94 @@ static void VS_CC comp_restore_create(const VSMap *in, VSMap *out, void *user_da
         snprintf(msg, sizeof(msg), "%s: %s", name, invoke_err);
         vsapi->mapSetError(out, msg);
         vsapi->freeMap(ret);
+        vsapi->freeNode(source);
         return;
     }
     VSNode *res_node = vsapi->mapGetNode(ret, "clip", 0, NULL);
     vsapi->freeMap(ret);
+
+    /* the outermost output columns sample beyond the active raster and
+     * cannot be reconstructed from it — they never rode the modeled
+     * channel. Splice them through from the source instead. */
+    const double s_left = anchor601 / rho - (active0 - 0.5)
+                          - 0.5 * (720.0 / width) / rho;
+    const double step = (720.0 / rho) / width;
+    int nl = 0, nr = 0;
+    while (nl < width && s_left + (nl + 0.5) * step < -0.5)
+        nl++;
+    while (nr < width && s_left + (width - nr - 0.5) * step > rwidth - 0.5)
+        nr++;
+    if (nl > 0 || nr > 0) {
+        VSPlugin *std = vsapi->getPluginByID("com.vapoursynth.std", core);
+        args = vsapi->createMap();
+        vsapi->mapConsumeNode(args, "clip", source, maReplace);
+        source = NULL;
+        vsapi->mapSetInt(args, "format", pfYUV444P16, maReplace);
+        vsapi->mapSetInt(args, "width", width, maReplace);
+        vsapi->mapSetInt(args, "height", d.vi.height, maReplace);
+        ret = vsapi->invoke(resize, "Spline36", args);
+        vsapi->freeMap(args);
+        if (vsapi->mapGetError(ret)) {
+            vsapi->mapSetError(out, "Restore: source edge conversion failed");
+            vsapi->freeMap(ret);
+            vsapi->freeNode(res_node);
+            return;
+        }
+        VSNode *orig = vsapi->mapGetNode(ret, "clip", 0, NULL);
+        vsapi->freeMap(ret);
+
+        VSNode *parts[3] = { NULL, NULL, NULL };
+        int nparts = 0;
+        const struct { VSNode *from; int left, right; } cuts[3] = {
+            { orig, 0, width - nl },
+            { res_node, nl, nr },
+            { orig, width - nr, 0 },
+        };
+        int fail = 0;
+        for (int i = 0; i < 3; i++) {
+            if ((i == 0 && nl == 0) || (i == 2 && nr == 0))
+                continue;
+            args = vsapi->createMap();
+            vsapi->mapSetNode(args, "clip", cuts[i].from, maReplace);
+            if (cuts[i].left)
+                vsapi->mapSetInt(args, "left", cuts[i].left, maReplace);
+            if (cuts[i].right)
+                vsapi->mapSetInt(args, "right", cuts[i].right, maReplace);
+            ret = vsapi->invoke(std, "Crop", args);
+            vsapi->freeMap(args);
+            if (vsapi->mapGetError(ret)) {
+                vsapi->freeMap(ret);
+                fail = 1;
+                break;
+            }
+            parts[nparts++] = vsapi->mapGetNode(ret, "clip", 0, NULL);
+            vsapi->freeMap(ret);
+        }
+        vsapi->freeNode(orig);
+        vsapi->freeNode(res_node);
+        res_node = NULL;
+        if (!fail) {
+            args = vsapi->createMap();
+            for (int i = 0; i < nparts; i++)
+                vsapi->mapConsumeNode(args, "clips", parts[i], maAppend);
+            ret = vsapi->invoke(std, "StackHorizontal", args);
+            vsapi->freeMap(args);
+            if (vsapi->mapGetError(ret))
+                fail = 1;
+            else
+                res_node = vsapi->mapGetNode(ret, "clip", 0, NULL);
+            vsapi->freeMap(ret);
+        } else {
+            for (int i = 0; i < nparts; i++)
+                vsapi->freeNode(parts[i]);
+        }
+        if (fail || !res_node) {
+            vsapi->mapSetError(out, "Restore: edge splice failed");
+            return;
+        }
+    } else {
+        vsapi->freeNode(source);
+    }
     vsapi->mapConsumeNode(out, "clip", res_node, maReplace);
 }
 
