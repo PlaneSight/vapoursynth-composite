@@ -58,7 +58,7 @@ for bad_args, needle in (
         assert False, f'expected error: {needle}'
 
 # ---- Decode: geometry and format invert Encode
-enc = core.composite.Encode(flat([32128, 40960, 28672], length=5))
+enc = core.composite.Encode(flat([32128, 40960, 28672], length=9))
 dec = core.composite.Decode(enc)
 assert (dec.width, dec.height) == (720, 576)
 assert dec.format.id == vs.YUV444P16
@@ -67,7 +67,7 @@ assert core.composite.Decode(enc, width=928).width == 928
 
 # ---- Round trip: flat color recovered within tolerance in the interior
 src_val = (32128, 40960, 28672)
-fr = dec.get_frame(2)
+fr = dec.get_frame(4)
 for p, want in enumerate(src_val):
     vals = [fr[p][r, x] for r in (40, 288, 535) for x in range(64, 656, 8)]
     worst = max(abs(v - want) for v in vals)
@@ -224,19 +224,28 @@ else:
     assert False, 'transform without dimensions=3 accepted'
 
 # ---- defaults are the measured best settings, and adapt to the path
+import numpy as _np
+_lut3 = list(_np.loadtxt('test/lut_pal_3d.txt'))
+_lutn = list(_np.loadtxt('test/lut_ntsc.txt'))
 d_def = core.composite.Decode(core.composite.Encode(pal_src))
 d_exp = core.composite.Decode(core.composite.Encode(pal_src),
-                              dimensions=3, level=1, eq=2)
+                              dimensions=3, lut=_lut3, eq=2)
 for pl in range(3):
     assert bytes(d_def.get_frame(4)[pl]) == bytes(d_exp.get_frame(4)[pl])
 n_def = core.composite.Decode(core.composite.Encode(bff9, standard='ntsc'),
                               standard='ntsc')
 n_exp = core.composite.Decode(core.composite.Encode(bff9, standard='ntsc'),
                               standard='ntsc', dimensions=3, transform=2,
-                              level=1, eq=2)
+                              lut=_lutn, eq=2)
 for pl in range(3):
     assert bytes(n_def.get_frame(4)[pl]) == bytes(n_exp.get_frame(4)[pl])
-# an explicit threshold implies threshold mode (level default drops to 0)
+# an explicit level or threshold selects its own mode over the builtin lut
+l_def = core.composite.Decode(core.composite.Encode(pal_src), level=1)
+l_exp = core.composite.Decode(core.composite.Encode(pal_src),
+                              dimensions=3, level=1, eq=2)
+for pl in range(3):
+    assert bytes(l_def.get_frame(4)[pl]) == bytes(l_exp.get_frame(4)[pl])
+assert bytes(d_def.get_frame(4)[0]) != bytes(l_def.get_frame(4)[0])
 t_def = core.composite.Decode(core.composite.Encode(pal_src), threshold=0.4)
 t_exp = core.composite.Decode(core.composite.Encode(pal_src),
                               dimensions=3, level=0, eq=2, threshold=0.4)
@@ -378,7 +387,7 @@ for bad_kw, needle in ((dict(evidence=-1.0), '>= 0'),
         assert False, f'expected error: {needle}'
 
 # ---- leak-aware eq: works on PAL transforms, differs from eq=1
-eq2 = core.composite.Decode(enc_t, eq=2)
+eq2 = core.composite.Decode(enc_t, dimensions=2, eq=2)
 fr = eq2.get_frame(0)
 for pl, want in enumerate((30000, 40960, 28672)):
     vals = [fr[pl][r, x] for r in (100, 288, 475) for x in range(48, 312, 8)]

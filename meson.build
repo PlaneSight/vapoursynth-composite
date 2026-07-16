@@ -25,7 +25,7 @@ core = static_library('composite_core',
 )
 
 shared_module('composite',
-    files('src/composite.c'),
+    files('src/composite.c', 'src/lut_tables.c'),
     dependencies: core_deps,
     gnu_symbol_visibility: 'hidden',
     include_directories: incdir,

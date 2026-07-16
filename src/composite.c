@@ -15,6 +15,7 @@
 
 #include "decode.h"
 #include "encode.h"
+#include "lut_tables.h"
 #include "subcarrier.h"
 
 typedef struct comp_filter_t comp_filter_t;
@@ -322,13 +323,15 @@ static void VS_CC comp_decode_create(const VSMap *in, VSMap *out, void *user_dat
     if (eq == 2 && !has_transform)
         RETERROR("eq=2 needs a transform separation");
 
-    /* an explicit threshold, thresholds, or lut selects its own mode,
-     * so the level default only applies in their absence */
+    /* an explicit threshold, thresholds, lut, or level selects its own
+     * mode; in their absence a transform path defaults to the built-in
+     * trained soft-gain table (set after the decoder is created) */
     int level = vsapi->mapGetIntSaturated(in, "level", 0, &err);
+    const int builtin_lut = err && has_transform && threshold_unset
+                            && vsapi->mapNumElements(in, "thresholds") < 1
+                            && vsapi->mapNumElements(in, "lut") < 1;
     if (err)
-        level = has_transform && threshold_unset
-                && vsapi->mapNumElements(in, "thresholds") < 1
-                && vsapi->mapNumElements(in, "lut") < 1 ? 1 : 0;
+        level = 0;
     if (level && dimensions < 2)
         RETERROR("level=1 needs dimensions 2 or 3");
     if (level && d.standard == COMP_STD_NTSC && !transform)
@@ -415,6 +418,16 @@ static void VS_CC comp_decode_create(const VSMap *in, VSMap *out, void *user_dat
             if (!(lv[i] >= 0.0 && lv[i] <= 1.0))
                 RETERROR("lut values must be in [0, 1]");
         comp_decode_set_lut(d.dec, lv, nlut);
+    } else if (builtin_lut) {
+        if (d.standard == COMP_STD_PAL)
+            comp_decode_set_lut(d.dec,
+                                dimensions == 2 ? comp_lut_builtin_pal_2d
+                                                : comp_lut_builtin_pal_3d,
+                                (dimensions == 2 ? COMP_T2D_NTHRESH
+                                                 : COMP_T3D_NTHRESH) * COMP_LUT_K);
+        else
+            comp_decode_set_lut(d.dec, comp_lut_builtin_ntsc,
+                                COMP_T3D_NTHRESH * COMP_LUT_K);
     }
 
     vsapi->queryVideoFormat(&d.vi.format, cfYUV, stInteger, 16, 0, 0, core);
@@ -532,13 +545,15 @@ static void VS_CC comp_restore_create(const VSMap *in, VSMap *out, void *user_da
     if (eq == 2 && !has_transform)
         RETERROR("eq=2 needs a transform separation");
 
-    /* an explicit threshold, thresholds, or lut selects its own mode,
-     * so the level default only applies in their absence */
+    /* an explicit threshold, thresholds, lut, or level selects its own
+     * mode; in their absence a transform path defaults to the built-in
+     * trained soft-gain table (set after the decoder is created) */
     int level = vsapi->mapGetIntSaturated(in, "level", 0, &err);
+    const int builtin_lut = err && has_transform && threshold_unset
+                            && vsapi->mapNumElements(in, "thresholds") < 1
+                            && vsapi->mapNumElements(in, "lut") < 1;
     if (err)
-        level = has_transform && threshold_unset
-                && vsapi->mapNumElements(in, "thresholds") < 1
-                && vsapi->mapNumElements(in, "lut") < 1 ? 1 : 0;
+        level = 0;
     if (level && dimensions < 2)
         RETERROR("level=1 needs dimensions 2 or 3");
     if (level && d.standard == COMP_STD_NTSC && !transform)
@@ -676,6 +691,16 @@ static void VS_CC comp_restore_create(const VSMap *in, VSMap *out, void *user_da
             if (!(lv[i] >= 0.0 && lv[i] <= 1.0))
                 RETERROR("lut values must be in [0, 1]");
         comp_decode_set_lut(d.dec, lv, nlut);
+    } else if (builtin_lut) {
+        if (d.standard == COMP_STD_PAL)
+            comp_decode_set_lut(d.dec,
+                                dimensions == 2 ? comp_lut_builtin_pal_2d
+                                                : comp_lut_builtin_pal_3d,
+                                (dimensions == 2 ? COMP_T2D_NTHRESH
+                                                 : COMP_T3D_NTHRESH) * COMP_LUT_K);
+        else
+            comp_decode_set_lut(d.dec, comp_lut_builtin_ntsc,
+                                COMP_T3D_NTHRESH * COMP_LUT_K);
     }
 
     vsapi->queryVideoFormat(&d.vi.format, cfYUV, stInteger, 16, 0, 0, core);

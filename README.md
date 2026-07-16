@@ -43,7 +43,7 @@ rows 5..484. 486-line input is used as-is.
 
 ```python
 out = core.composite.Decode(comp, standard="pal", width=720, dimensions=3,
-                            setup=0, level=1, eq=2)
+                            setup=0, eq=2)
 ```
 
 Composite GRAY16 back to YUV444P16, resampled to `width`. PAL uses
@@ -52,8 +52,10 @@ NTSC uses an adaptive line comb, a Transform NTSC separation, or a
 motion-routed hybrid of the two via `transform`. The defaults shown
 are the measured best general configuration; unset parameters adapt
 to the chosen path (picking `dimensions=1` or an NTSC comb quietly
-drops `level`/`eq` back to their supported values, and an explicit
-`threshold`, `thresholds`, or `lut` selects its own separation mode).
+drops back to the supported behavior, and an explicit `threshold`,
+`thresholds`, `level`, or `lut` selects its own separation mode).
+Transform paths separate with built-in trained soft-gain tables by
+default.
 
 - `width` — output width (default 720); the resample inverts Encode's
   BT.601↔4×fsc mapping exactly.
@@ -78,19 +80,21 @@ drops `level`/`eq` back to their supported values, and an explicit
   VQEG corpora ship in `test/`: `thresholds_pal_2d.txt` (beats any
   uniform threshold), `thresholds_pal_3d.txt` (experimental),
   `thresholds_ntsc.txt`.
-- `level` — amplitude limiting instead of the keep/discard test
-  (GB 2365247 A's preferred embodiment): each bin pair's larger
-  magnitude is reduced to the smaller, phase preserved. Measurably
-  better on moving content and real footage; slightly softer on
-  static synthetic detail. Default on wherever a transform separation
-  is present and no `threshold`/`thresholds`/`lut` was given.
+- `level` — amplitude limiting instead of the trained tables or the
+  keep/discard test (GB 2365247 A's preferred embodiment): each bin
+  pair's larger magnitude is reduced to the smaller, phase preserved.
+  The robust untrained mode: nearly the trained tables' equal on real
+  footage, and safer on synthetic extremes.
 - `lut` — trained soft separation (after US 7,872,689): per frequency
   bin, a gain over the pair-symmetry ratio, 16 knots per bin (1280
   values for `dimensions=2`, 12288 for 3; transform separations only).
-  `test/calibrate_thresholds.py` derives tables from a clean corpus in
-  closed form; trained sets ship as `test/lut_pal_{2d,3d}.txt` and
-  `test/lut_ntsc.txt`. Strongest on natural content; the untrained
-  modes are safer on synthetic extremes.
+  Trained tables are built into the plugin and used by default; `lut`
+  overrides them with your own table. `test/calibrate_thresholds.py`
+  derives tables from a clean corpus in closed form (the shipped
+  tables are `test/lut_pal_{2d,3d}.txt` and `test/lut_ntsc.txt`,
+  embedded via `test/gen_lut_tables.py`). Strongest on natural
+  content; `level=1` is the untrained alternative for synthetic
+  extremes.
 - `eq` — chroma equalization of the known encode+decode filter
   cascade. `0` off; `1` the fixed inverse, +1.7 dB chroma PSNR on
   color detail but it amplifies separation leak on near-monochrome
@@ -132,11 +136,11 @@ clips, and real footage; artifact numbers are chroma HF energy and
 temporal flicker in the worst-artifact regions:
 
 - The defaults are the measured best general configuration
-  (`dimensions=3, level=1, eq=2`, NTSC additionally `transform=2`) —
-  on the reference clip they remove ~42% of hot-spot chroma HF and
-  ~50% of flicker versus doing nothing, where a plain 2D threshold
-  decode manages 25%/20%. Add `evidence=1.0` for artifact-heavy
-  material.
+  (`dimensions=3, eq=2`, built-in trained tables, NTSC additionally
+  `transform=2`) — on the reference clip they remove ~41% of hot-spot
+  chroma HF and ~44% of flicker versus doing nothing, where a plain
+  2D threshold decode manages 25%/20%. Add `evidence=1.0` for
+  artifact-heavy material.
 - `dimensions=2` is the fast path, and the right one for stills or
   very short clips (the 3D window spans ±3 frames).
 - `lut` with the shipped trained tables wins on natural content
