@@ -270,11 +270,13 @@ def main():
             if standard == 'pal':
                 configs = [('NR 2D t=0.4', dict(dimensions=2, threshold=0.4)),
                            ('NR 2D eq=0', dict(dimensions=2, eq=0)),
+                           ('NR 2D eq=2', dict(dimensions=2, eq=2)),
                            ('NR 2D t=0.7', dict(dimensions=2, threshold=0.7)),
                            ('NR 2D level', dict(dimensions=2, level=1)),
                            ('NR 3D t=0.4', dict(dimensions=3, threshold=0.4)),
                            ('NR 3D t=0.7', dict(dimensions=3, threshold=0.7)),
-                           ('NR 3D level', dict(dimensions=3, level=1))]
+                           ('NR 3D level', dict(dimensions=3, level=1)),
+                           ('NR 3D eq=2', dict(dimensions=3, eq=2))]
             else:
                 configs = [('NR 2D', dict(dimensions=2)),
                            ('NR 2D eq=0', dict(dimensions=2, eq=0)),
