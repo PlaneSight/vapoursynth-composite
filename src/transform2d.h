@@ -45,10 +45,13 @@ void comp_transform2d_set_lut(comp_transform2d_t *t, const double *v);
 void comp_transform2d_free(comp_transform2d_t *t);
 
 /* Extract the chroma component of one field of active-picture composite.
- * comp/chroma are field views (strides in samples); chroma is overwritten. */
+ * comp/chroma are field views (strides in samples); chroma is
+ * overwritten. conf, when non-NULL, receives a [0,1] chroma-confidence
+ * map (the kept energy's mean pair-symmetry ratio, overlap-added). */
 void comp_transform2d_field(const comp_transform2d_t *t,
                             const uint16_t *comp, ptrdiff_t comp_stride,
                             int width, int rows,
-                            float *chroma, ptrdiff_t chroma_stride);
+                            float *chroma, ptrdiff_t chroma_stride,
+                            float *conf, ptrdiff_t conf_stride);
 
 #endif

@@ -101,6 +101,10 @@ int comp_decode_init(comp_decode_t *d, int standard, double threshold,
         return -1;
     if (level && (dimensions < 2 || (standard == COMP_STD_NTSC && !use_transform)))
         return -1;
+    if (eq < 0 || eq > 2)
+        return -1;
+    if (eq == 2 && (standard != COMP_STD_PAL || dimensions < 2))
+        return -1;
 
     memset(d, 0, sizeof(*d));
 
@@ -114,7 +118,7 @@ int comp_decode_init(comp_decode_t *d, int standard, double threshold,
     d->standard = standard;
     d->dimensions = dimensions;
     d->use_transform = !!use_transform;
-    d->eq = !!eq;
+    d->eq = eq;
     d->width = enc.width;
     d->height = standard == COMP_STD_PAL ? COMP_ACTIVE_HEIGHT_PAL
                                          : COMP_ACTIVE_HEIGHT_NTSC;
@@ -214,6 +218,13 @@ int comp_decode_init(comp_decode_t *d, int standard, double threshold,
                 return -1;
             }
         }
+        if (eq == 2) {
+            d->scratch[i].conf = malloc(sizeof(float) * d->width * d->height);
+            if (!d->scratch[i].conf) {
+                comp_decode_free(d);
+                return -1;
+            }
+        }
         if (refine > 0) {
             /* YUV estimate (3 planes), recomposite, crude Y, spare */
             d->scratch[i].refine = malloc(sizeof(uint16_t) * d->width * d->height * 6);
@@ -234,6 +245,7 @@ void comp_decode_free(comp_decode_t *d)
         for (int i = 0; i < d->nscratch; i++) {
             free(d->scratch[i].chroma_f);
             free(d->scratch[i].chroma);
+            free(d->scratch[i].conf);
             free(d->scratch[i].tmp3);
             free(d->scratch[i].refine);
         }
@@ -345,10 +357,13 @@ static inline int16_t clamp_i16(long v)
 }
 
 /* Demodulate one PAL field. comp and chroma are field views; the output
- * pointers are frame planes, written at rows 2*fieldline + field. */
+ * pointers are frame planes, written at rows 2*fieldline + field.
+ * conf (a field view at chroma_stride, may be NULL) is the transform's
+ * chroma-confidence map, which scales the eq=2 boost per sample. */
 static void pal_decode_field(const comp_decode_t *d, int frame, int field,
                              const uint16_t *comp, ptrdiff_t comp_stride,
                              const int16_t *chroma, ptrdiff_t chroma_stride,
+                             const float *conf,
                              uint16_t *dsty, ptrdiff_t ystride,
                              uint16_t *dstu, ptrdiff_t ustride,
                              uint16_t *dstv, ptrdiff_t vstride)
@@ -449,6 +464,23 @@ static void pal_decode_field(const comp_decode_t *d, int frame, int field,
         if (d->eq) {
             eq_row(d, u_row, u_eq, w);
             eq_row(d, v_row, v_eq, w);
+            if (d->eq == 2 && conf) {
+                /* scale the boost by the separation's confidence: full
+                 * where the kept pairs were symmetric (real chroma),
+                 * none where they were marginal or absent. Real chroma
+                 * measures ~0.94 mean ratio and leak ~0.3-0.8, so the
+                 * fourth power widens the gap (0.79 vs under 0.1). */
+                const float *cw = conf + fr * chroma_stride;
+                for (int x = 0; x < w; x++) {
+                    const float c2 = cw[x] * cw[x];
+                    int32_t wq = (int32_t)lrintf(c2 * c2 * 32768.0f);
+                    wq = wq < 0 ? 0 : wq > 32768 ? 32768 : wq;
+                    u_eq[x] = u_row[x]
+                        + (int32_t)(((int64_t)wq * (u_eq[x] - u_row[x])) >> 15);
+                    v_eq[x] = v_row[x]
+                        + (int32_t)(((int64_t)wq * (v_eq[x] - v_row[x])) >> 15);
+                }
+            }
             u_out = u_eq;
             v_out = v_eq;
         }
@@ -848,7 +880,8 @@ void comp_decode_frame(comp_decode_t *d, int frame, int nframes,
                 comp_transform2d_field(&d->transform,
                                        comp + field * comp_stride, 2 * comp_stride,
                                        w, frows,
-                                       s->chroma_f + field * w, 2 * w);
+                                       s->chroma_f + field * w, 2 * w,
+                                       s->conf ? s->conf + field * w : NULL, 2 * w);
             }
         } else {
             /* build the field stack the covering 3D tiles need; the
@@ -877,7 +910,8 @@ void comp_decode_frame(comp_decode_t *d, int frame, int nframes,
             }
             comp_transform3d_frame(&d->transform3, fields, z0, nfields,
                                    frame, 0, w, frows,
-                                   s->chroma_f, s->chroma_f + w, 2 * w);
+                                   s->chroma_f, s->chroma_f + w, 2 * w,
+                                   s->conf, s->conf ? s->conf + w : NULL);
         }
 
         /* quantise the separated chroma once for the fixed-point demod */
@@ -888,6 +922,7 @@ void comp_decode_frame(comp_decode_t *d, int frame, int nframes,
             pal_decode_field(d, frame, field,
                              comp + field * comp_stride, 2 * comp_stride,
                              s->chroma + field * w, 2 * w,
+                             s->conf ? s->conf + field * w : NULL,
                              dsty, ystride, dstu, ustride, dstv, vstride);
         }
     } else {
@@ -915,7 +950,8 @@ void comp_decode_frame(comp_decode_t *d, int frame, int nframes,
             }
             comp_transform3d_frame(&d->transform3, fields, z0, nfields,
                                    frame, parity, w, rows / 2,
-                                   s->chroma_f, s->chroma_f + w, 2 * w);
+                                   s->chroma_f, s->chroma_f + w, 2 * w,
+                                   NULL, NULL);
             for (int i = 0; i < w * rows; i++)
                 s->chroma[i] = clamp_i16(lrintf(s->chroma_f[i]));
         } else if (d->dimensions == 2) {

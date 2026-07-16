@@ -11,6 +11,10 @@
 #include "decode.h"
 #include "encode.h"
 
+#ifndef M_PI
+#define M_PI 3.14159265358979323846
+#endif
+
 #define W COMP_ACTIVE_WIDTH_PAL
 #define H COMP_ACTIVE_HEIGHT_PAL
 
@@ -208,16 +212,26 @@ static void test_3d_roundtrip(int standard, int use_transform, int level)
 
 
 /* the cascade equalizer must sharpen chroma (lower round-trip error on
- * a chroma frequency sweep) without disturbing flat chroma */
+ * a chroma frequency sweep) without disturbing flat chroma; the
+ * leak-aware mode must keep that gain on real chroma while not
+ * amplifying separation leak on monochrome detail */
 static void test_eq(void)
 {
     comp_encode_t enc;
-    comp_decode_t dec0, dec1;
+    comp_decode_t dec0, dec1, dec2;
     const int w = COMP_ACTIVE_WIDTH_PAL;
 
     CHECK(comp_encode_init(&enc, COMP_STD_PAL, 0, 0) == 0, "eq encode init");
     CHECK(comp_decode_init(&dec0, COMP_STD_PAL, 0.4, 1, 0, 2, 0, 0, 0, 0) == 0, "eq=0 init");
     CHECK(comp_decode_init(&dec1, COMP_STD_PAL, 0.4, 1, 0, 2, 1, 0, 0, 0) == 0, "eq=1 init");
+    CHECK(comp_decode_init(&dec2, COMP_STD_PAL, 0.4, 1, 0, 2, 2, 0, 0, 0) == 0, "eq=2 init");
+    CHECK(comp_decode_init(&dec2, COMP_STD_NTSC, 0.4, 1, 0, 2, 2, 0, 0, 0) != 0,
+          "eq=2 on the ntsc comb must be rejected");
+    CHECK(comp_decode_init(&dec2, COMP_STD_PAL, 0.4, 1, 0, 1, 2, 0, 0, 0) != 0,
+          "eq=2 with dimensions=1 must be rejected");
+    CHECK(comp_decode_init(&dec2, COMP_STD_PAL, 0.4, 1, 0, 2, 3, 0, 0, 0) != 0,
+          "eq=3 must be rejected");
+    CHECK(comp_decode_init(&dec2, COMP_STD_PAL, 0.4, 1, 0, 2, 2, 0, 0, 0) == 0, "eq=2 re-init");
 
     /* flat luma, U carries a horizontal frequency sweep */
     for (int r = 0; r < H; r++) {
@@ -233,9 +247,9 @@ static void test_eq(void)
 
     const comp_frame_view_t v = { comp[0], w };
     const int vf = 0;
-    double err[2];
-    comp_decode_t *decs[2] = { &dec0, &dec1 };
-    for (int e = 0; e < 2; e++) {
+    double err[3];
+    comp_decode_t *decs[3] = { &dec0, &dec1, &dec2 };
+    for (int e = 0; e < 3; e++) {
         comp_decode_frame(decs[e], 0, 1, H, 0, &v, &vf, 0, NULL, 0,
                           outy[0], w, outu[0], w, outv[0], w);
         double sum = 0.0;
@@ -246,12 +260,49 @@ static void test_eq(void)
             }
         err[e] = sum;
     }
-    printf("test_decode: eq sweep U mse ratio %.3f (eq=1/eq=0)\n", err[1] / err[0]);
+    printf("test_decode: eq sweep U mse ratio %.3f (eq=1/eq=0), %.3f (eq=2/eq=0)\n",
+           err[1] / err[0], err[2] / err[0]);
     CHECK(err[1] < err[0] * 0.75, "equalizer did not improve the sweep (%f)", err[1] / err[0]);
+    CHECK(err[2] < err[0] * 0.80, "leak-aware eq lost the sweep gain (%f)", err[2] / err[0]);
+
+    /* monochrome zone plate (radial luma chirp): its partial symmetries
+     * leak into chroma, and the leak must not be amplified by the
+     * leak-aware mode */
+    for (int r = 0; r < H; r++)
+        for (int x = 0; x < w; x++) {
+            const double dx = x - w / 2.0, dy = r - H / 2.0;
+            srcy[r][x] = (uint16_t)(30000
+                + 10000.0 * cos(M_PI * (dx * dx + dy * dy) / (2.0 * w)));
+            srcu[r][x] = srcv[r][x] = 32768;
+        }
+    for (int r = 0; r < H; r++)
+        comp_encode_line(&enc, comp[r], srcy[r], srcu[r], srcv[r],
+                         comp_sc_line(COMP_STD_PAL, 0, r));
+    double leak[3];
+    for (int e = 0; e < 3; e++) {
+        comp_decode_frame(decs[e], 0, 1, H, 0, &v, &vf, 0, NULL, 0,
+                          outy[0], w, outu[0], w, outv[0], w);
+        double sum = 0.0;
+        for (int r = 32; r < H - 32; r++)
+            for (int x = 48; x < w - 48; x++) {
+                const double du = (double)outu[r][x] - 32768;
+                const double dv = (double)outv[r][x] - 32768;
+                sum += du * du + dv * dv;
+            }
+        leak[e] = sum;
+    }
+    printf("test_decode: eq mono leak ratio %.3f (eq=1/eq=0), %.3f (eq=2/eq=0)\n",
+           leak[1] / leak[0], leak[2] / leak[0]);
+    /* the confidence map cannot null the boost on leak that is itself
+     * fairly symmetric; require at least half the excess to go */
+    CHECK(leak[2] - leak[0] < 0.5 * (leak[1] - leak[0]),
+          "leak-aware eq kept too much of the leak boost (%f vs %f)",
+          leak[2] / leak[0], leak[1] / leak[0]);
 
     /* flat chroma is preserved to within quantization */
     for (int r = 0; r < H; r++)
         for (int x = 0; x < w; x++) {
+            srcy[r][x] = 30000;
             srcu[r][x] = 40960;
             srcv[r][x] = 28672;
         }
@@ -268,6 +319,7 @@ static void test_eq(void)
 
     comp_decode_free(&dec0);
     comp_decode_free(&dec1);
+    comp_decode_free(&dec2);
 }
 
 

@@ -104,10 +104,13 @@ static inline float lut_gain(const float *row, float lo, float hi)
     return row[k] + (row[k + 1] - row[k]) * (pos - k);
 }
 
-static void apply_filter(const comp_transform3d_t *t,
-                         const fftwf_complex *in, fftwf_complex *out)
+/* Returns the tile's chroma confidence: the kept output energy's mean
+ * pair-symmetry ratio, 0 when nothing was kept. */
+static float apply_filter(const comp_transform3d_t *t,
+                          const fftwf_complex *in, fftwf_complex *out)
 {
     const float *tsq = t->threshold_sq;
+    float conf_num = 0.0f, conf_den = 0.0f;
 
     memset(out, 0, sizeof(fftwf_complex) * TILE_CPLX);
 
@@ -127,22 +130,28 @@ static void apply_filter(const comp_transform3d_t *t,
                 if (x == x_ref && y == y_ref && z == z_ref) {
                     bo[x][0] = bi[x][0];
                     bo[x][1] = bi[x][1];
+                    conf_num += bi[x][0] * bi[x][0] + bi[x][1] * bi[x][1];
+                    conf_den += bi[x][0] * bi[x][0] + bi[x][1] * bi[x][1];
                     continue;
                 }
 
                 const float m_in_sq = bi[x][0] * bi[x][0] + bi[x][1] * bi[x][1];
                 const float m_ref_sq = bi_ref[x_ref][0] * bi_ref[x_ref][0]
                                      + bi_ref[x_ref][1] * bi_ref[x_ref][1];
+                const float lo = m_in_sq < m_ref_sq ? m_in_sq : m_ref_sq;
+                const float hi = m_in_sq < m_ref_sq ? m_ref_sq : m_in_sq;
+                const float r = hi > 0.0f ? lo / hi : 1.0f;
 
                 if (t->use_lut) {
                     const int bin = (int)(tsq - t->threshold_sq) - 1;
-                    const float lo = m_in_sq < m_ref_sq ? m_in_sq : m_ref_sq;
-                    const float hi = m_in_sq < m_ref_sq ? m_ref_sq : m_in_sq;
                     const float g = lut_gain(t->lut[bin], lo, hi);
                     bo[x][0] = bi[x][0] * g;
                     bo[x][1] = bi[x][1] * g;
                     bo_ref[x_ref][0] = bi_ref[x_ref][0] * g;
                     bo_ref[x_ref][1] = bi_ref[x_ref][1] * g;
+                    const float e = g * g * (m_in_sq + m_ref_sq);
+                    conf_num += e * r;
+                    conf_den += e;
                     continue;
                 }
 
@@ -158,6 +167,8 @@ static void apply_filter(const comp_transform3d_t *t,
                     bo[x][1] = bi[x][1] * f_in;
                     bo_ref[x_ref][0] = bi_ref[x_ref][0] * f_ref;
                     bo_ref[x_ref][1] = bi_ref[x_ref][1] * f_ref;
+                    conf_num += 2.0f * lo * r;
+                    conf_den += 2.0f * lo;
                     continue;
                 }
 
@@ -169,9 +180,13 @@ static void apply_filter(const comp_transform3d_t *t,
                 bo[x][1] = bi[x][1];
                 bo_ref[x_ref][0] = bi_ref[x_ref][0];
                 bo_ref[x_ref][1] = bi_ref[x_ref][1];
+                conf_num += (m_in_sq + m_ref_sq) * r;
+                conf_den += m_in_sq + m_ref_sq;
             }
         }
     }
+
+    return conf_den > 0.0f ? conf_num / conf_den : 0.0f;
 }
 
 
@@ -314,18 +329,23 @@ static void apply_filter_ntsc(const comp_transform3d_t *t,
 void comp_transform3d_frame(const comp_transform3d_t *t,
                             const comp_field_view_t *fields, int z0, int nfields,
                             int frame, int parity, int width, int field_rows,
-                            float *chroma0, float *chroma1, ptrdiff_t chroma_stride)
+                            float *chroma0, float *chroma1, ptrdiff_t chroma_stride,
+                            float *conf0, float *conf1)
 {
     float real[TILE_REAL];
     fftwf_complex cplx_in[TILE_CPLX];
     fftwf_complex cplx_out[TILE_CPLX];
     float *chroma[2] = { chroma0, chroma1 };
+    float *conf[2] = { conf0, conf1 };
     const int fout = frame * 2;
     const int frame_lines = field_rows * 2;
 
     for (int f = 0; f < 2; f++)
-        for (int r = 0; r < field_rows; r++)
+        for (int r = 0; r < field_rows; r++) {
             memset(chroma[f] + r * chroma_stride, 0, sizeof(float) * width);
+            if (conf[f])
+                memset(conf[f] + r * chroma_stride, 0, sizeof(float) * width);
+        }
 
     /* the two half-overlapped z positions whose tiles cover this frame's
      * fields; the grid is anchored at absolute field 0 */
@@ -364,19 +384,22 @@ void comp_transform3d_frame(const comp_transform3d_t *t,
                 }
                 fftwf_execute_dft_r2c(t->forward, real, cplx_in);
 
+                float w = 0.0f;
                 if (t->standard == COMP_STD_PAL)
-                    apply_filter(t, cplx_in, cplx_out);
+                    w = apply_filter(t, cplx_in, cplx_out);
                 else
                     apply_filter_ntsc(t, cplx_in, cplx_out);
 
                 fftwf_execute_dft_c2r(t->inverse, cplx_out, real);
 
-                /* overlap-add only the parts landing on our two fields */
+                /* overlap-add only the parts landing on our two fields;
+                 * the confidence uses the same unity-sum window weights */
                 for (int z = 0; z < ZTILE; z++) {
                     const int g = tz + z;
                     if (g != fout && g != fout + 1)
                         continue;
                     float *cb = chroma[(g - fout) ^ parity];
+                    float *wb = conf[(g - fout) ^ parity];
                     for (int y = start_y; y < end_y; y++) {
                         const int fl = tile_y + y;
                         if (((fl + parity) & 1) != (g & 1))
@@ -385,6 +408,11 @@ void comp_transform3d_frame(const comp_transform3d_t *t,
                         for (int x = start_x; x < end_x; x++)
                             b[tile_x + x] += real[(z * YTILE + y) * XTILE + x]
                                              / (ZTILE * YTILE * XTILE);
+                        if (wb) {
+                            float *bw = wb + (fl >> 1) * chroma_stride;
+                            for (int x = start_x; x < end_x; x++)
+                                bw[tile_x + x] += w * t->window[z][y][x];
+                        }
                     }
                 }
             }

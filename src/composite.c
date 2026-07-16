@@ -294,6 +294,10 @@ static void VS_CC comp_decode_create(const VSMap *in, VSMap *out, void *user_dat
     int eq = vsapi->mapGetIntSaturated(in, "eq", 0, &err);
     if (err)
         eq = 1;
+    if (eq < 0 || eq > 2)
+        RETERROR("eq must be 0 (off), 1 (fixed) or 2 (leak-aware)");
+    if (eq == 2 && (d.standard != COMP_STD_PAL || dimensions < 2))
+        RETERROR("eq=2 needs a pal transform (dimensions 2 or 3)");
 
 
 
@@ -473,6 +477,10 @@ static void VS_CC comp_restore_create(const VSMap *in, VSMap *out, void *user_da
     int eq = vsapi->mapGetIntSaturated(in, "eq", 0, &err);
     if (err)
         eq = 1;
+    if (eq < 0 || eq > 2)
+        RETERROR("eq must be 0 (off), 1 (fixed) or 2 (leak-aware)");
+    if (eq == 2 && (d.standard != COMP_STD_PAL || dimensions < 2))
+        RETERROR("eq=2 needs a pal transform (dimensions 2 or 3)");
 
     int refine = vsapi->mapGetIntSaturated(in, "refine", 0, &err);
     if (err)

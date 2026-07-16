@@ -137,7 +137,7 @@ int main(void)
                          comp_sc_line(COMP_STD_PAL, 0, fr * 2));
     }
 
-    comp_transform2d_field(&t2d, comp, W, W, ROWS, got, W);
+    comp_transform2d_field(&t2d, comp, W, W, ROWS, got, W, NULL, 0);
     ref_field(comp, 0.4, want);
 
     double max_diff = 0.0;

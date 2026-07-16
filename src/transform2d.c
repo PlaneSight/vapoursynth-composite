@@ -106,11 +106,15 @@ static inline float lut_gain(const float *row, float lo, float hi)
  * smaller, phase preserved (GB 2365247 A): true chroma pairs have
  * equal magnitudes and pass unchanged, so only asymmetric (luma)
  * energy is reduced. With a trained LUT, each pair gets a per-bin
- * gain looked up from its symmetry ratio (US 7,872,689). */
-static void apply_filter(const comp_transform2d_t *t,
-                         const fftwf_complex *in, fftwf_complex *out)
+ * gain looked up from its symmetry ratio (US 7,872,689).
+ *
+ * Returns the tile's chroma confidence: the kept output energy's mean
+ * pair-symmetry ratio, 0 when nothing was kept. */
+static float apply_filter(const comp_transform2d_t *t,
+                          const fftwf_complex *in, fftwf_complex *out)
 {
     const float *tsq = t->threshold_sq;
+    float conf_num = 0.0f, conf_den = 0.0f;
 
     memset(out, 0, sizeof(fftwf_complex) * YCOMPLEX * XCOMPLEX);
 
@@ -130,22 +134,28 @@ static void apply_filter(const comp_transform2d_t *t,
                 /* the bin is its own reflection: it is a carrier */
                 bo[x][0] = bi[x][0];
                 bo[x][1] = bi[x][1];
+                conf_num += bi[x][0] * bi[x][0] + bi[x][1] * bi[x][1];
+                conf_den += bi[x][0] * bi[x][0] + bi[x][1] * bi[x][1];
                 continue;
             }
 
             const float m_in_sq = bi[x][0] * bi[x][0] + bi[x][1] * bi[x][1];
             const float m_ref_sq = bi_ref[x_ref][0] * bi_ref[x_ref][0]
                                  + bi_ref[x_ref][1] * bi_ref[x_ref][1];
+            const float lo = m_in_sq < m_ref_sq ? m_in_sq : m_ref_sq;
+            const float hi = m_in_sq < m_ref_sq ? m_ref_sq : m_in_sq;
+            const float r = hi > 0.0f ? lo / hi : 1.0f;
 
             if (t->use_lut) {
                 const int bin = (int)(tsq - t->threshold_sq) - 1;
-                const float lo = m_in_sq < m_ref_sq ? m_in_sq : m_ref_sq;
-                const float hi = m_in_sq < m_ref_sq ? m_ref_sq : m_in_sq;
                 const float g = lut_gain(t->lut[bin], lo, hi);
                 bo[x][0] = bi[x][0] * g;
                 bo[x][1] = bi[x][1] * g;
                 bo_ref[x_ref][0] = bi_ref[x_ref][0] * g;
                 bo_ref[x_ref][1] = bi_ref[x_ref][1] * g;
+                const float e = g * g * (m_in_sq + m_ref_sq);
+                conf_num += e * r;
+                conf_den += e;
                 continue;
             }
 
@@ -159,6 +169,8 @@ static void apply_filter(const comp_transform2d_t *t,
                 bo[x][1] = bi[x][1] * f_in;
                 bo_ref[x_ref][0] = bi_ref[x_ref][0] * f_ref;
                 bo_ref[x_ref][1] = bi_ref[x_ref][1] * f_ref;
+                conf_num += 2.0f * lo * r;
+                conf_den += 2.0f * lo;
                 continue;
             }
 
@@ -170,21 +182,29 @@ static void apply_filter(const comp_transform2d_t *t,
             bo[x][1] = bi[x][1];
             bo_ref[x_ref][0] = bi_ref[x_ref][0];
             bo_ref[x_ref][1] = bi_ref[x_ref][1];
+            conf_num += (m_in_sq + m_ref_sq) * r;
+            conf_den += m_in_sq + m_ref_sq;
         }
     }
+
+    return conf_den > 0.0f ? conf_num / conf_den : 0.0f;
 }
 
 void comp_transform2d_field(const comp_transform2d_t *t,
                             const uint16_t *comp, ptrdiff_t comp_stride,
                             int width, int rows,
-                            float *chroma, ptrdiff_t chroma_stride)
+                            float *chroma, ptrdiff_t chroma_stride,
+                            float *conf, ptrdiff_t conf_stride)
 {
     float real[YTILE * XTILE];
     fftwf_complex cplx_in[YCOMPLEX * XCOMPLEX];
     fftwf_complex cplx_out[YCOMPLEX * XCOMPLEX];
 
-    for (int r = 0; r < rows; r++)
+    for (int r = 0; r < rows; r++) {
         memset(chroma + r * chroma_stride, 0, sizeof(float) * width);
+        if (conf)
+            memset(conf + r * conf_stride, 0, sizeof(float) * width);
+    }
 
     for (int tile_y = -YTILE / 2; tile_y < rows; tile_y += YTILE / 2) {
         const int start_y = tile_y < 0 ? -tile_y : 0;
@@ -206,7 +226,7 @@ void comp_transform2d_field(const comp_transform2d_t *t,
             }
             fftwf_execute_dft_r2c(t->forward, real, cplx_in);
 
-            apply_filter(t, cplx_in, cplx_out);
+            const float w = apply_filter(t, cplx_in, cplx_out);
 
             /* inverse FFT; overlap-add the active part, normalized */
             fftwf_execute_dft_c2r(t->inverse, cplx_out, real);
@@ -214,6 +234,16 @@ void comp_transform2d_field(const comp_transform2d_t *t,
                 float *b = chroma + (tile_y + y) * chroma_stride;
                 for (int x = start_x; x < end_x; x++)
                     b[tile_x + x] += real[y * XTILE + x] / (YTILE * XTILE);
+            }
+
+            /* the half-overlapped windows sum to unity, so accumulating
+             * confidence with the same weights yields a [0,1] map */
+            if (conf) {
+                for (int y = start_y; y < end_y; y++) {
+                    float *b = conf + (tile_y + y) * conf_stride;
+                    for (int x = start_x; x < end_x; x++)
+                        b[tile_x + x] += w * t->window[y][x];
+                }
             }
         }
     }

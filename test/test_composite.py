@@ -318,4 +318,26 @@ except vs.Error as e:
 else:
     assert False, 'lut accepted for ntsc'
 
+# ---- leak-aware eq: works on PAL transforms, differs from eq=1
+eq2 = core.composite.Decode(enc_t, eq=2)
+fr = eq2.get_frame(0)
+for pl, want in enumerate((30000, 40960, 28672)):
+    vals = [fr[pl][r, x] for r in (100, 288, 475) for x in range(48, 312, 8)]
+    worst = max(abs(v - want) for v in vals)
+    assert worst <= 96, ('pal2d-eq2', pl, want, worst)
+core.composite.Decode(enc_t, eq=2, dimensions=3).get_frame(0)
+core.composite.Restore(tex, eq=2).get_frame(0)
+for bad_kw, needle in ((dict(eq=3), 'eq must be'),
+                       (dict(eq=2, dimensions=1), 'dimensions 2 or 3'),
+                       (dict(eq=2, standard='ntsc', dimensions=3),
+                        'pal transform')):
+    try:
+        core.composite.Decode(core.composite.Encode(bff, standard='ntsc')
+                              if bad_kw.get('standard') == 'ntsc' else enc_t,
+                              **bad_kw)
+    except vs.Error as e:
+        assert needle in str(e), (needle, str(e))
+    else:
+        assert False, f'expected error: {needle}'
+
 print('test_composite: all tests passed')

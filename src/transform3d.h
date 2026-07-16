@@ -62,10 +62,13 @@ void comp_transform3d_set_lut(comp_transform3d_t *t, const double *v);
  * parity gives the raster row parity of even (temporally first) fields:
  * 0 for PAL; NTSC's first field sits on odd rows at row offsets 0/4 and
  * even rows at offset 5. chroma0/chroma1 are the row-parity field
- * buffers matching the raster layout. */
+ * buffers matching the raster layout. conf0/conf1, when non-NULL,
+ * receive [0,1] chroma-confidence maps (PAL only; same layout and
+ * stride as the chroma buffers). */
 void comp_transform3d_frame(const comp_transform3d_t *t,
                             const comp_field_view_t *fields, int z0, int nfields,
                             int frame, int parity, int width, int field_rows,
-                            float *chroma0, float *chroma1, ptrdiff_t chroma_stride);
+                            float *chroma0, float *chroma1, ptrdiff_t chroma_stride,
+                            float *conf0, float *conf1);
 
 #endif

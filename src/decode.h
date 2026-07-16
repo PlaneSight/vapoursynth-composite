@@ -19,6 +19,7 @@ struct comp_decode_scratch_t {
     int used;
     float *chroma_f;    /* one frame, active raster */
     int16_t *chroma;    /* quantised copy for the fixed-point demod */
+    float *conf;        /* eq=2: transform chroma-confidence map */
     float *tmp3;        /* NTSC: 2D chroma; in 3D mode, 1D+2D of three frames */
     uint16_t *refine;   /* refine loop: YUV estimate, recomposite, scratch */
 };
@@ -44,7 +45,7 @@ struct comp_decode_t {
     int32_t level_black;
     int32_t luma_num, luma_den;  /* y16 = 4096 + (level - black) * num/den */
     int32_t comb_krange;         /* NTSC 2D comb adaptivity range */
-    int eq;                      /* chroma cascade equalizer enabled */
+    int eq;                      /* equalizer: 0 off, 1 fixed, 2 leak-aware */
     int32_t eq_q15[COMP_EQ_TAPS];
     int16_t sin_q15[COMP_SC_DEN_PAL];
     int32_t cfilt_q16[COMP_DECODE_FILTER_SIZE + 1][4];
@@ -65,7 +66,9 @@ struct comp_decode_t {
  * is the number of Y-only Landweber refinement iterations against the
  * dimensions=1 model; use_transform selects Transform NTSC separation
  * instead of the comb (NTSC, dimensions=3 only); level selects the
- * transform's amplitude-limiting mode (threshold then unused). */
+ * transform's amplitude-limiting mode (threshold then unused).
+ * eq: 0 off, 1 the fixed cascade inverse, 2 leak-aware (the boost is
+ * scaled by the transform's confidence map; PAL dimensions >= 2). */
 int comp_decode_init(comp_decode_t *d, int standard, double threshold,
                      int nscratch, int setup, int dimensions, int eq, int refine,
                      int use_transform, int level);
