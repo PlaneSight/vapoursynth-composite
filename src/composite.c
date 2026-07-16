@@ -304,10 +304,12 @@ static void VS_CC comp_decode_create(const VSMap *in, VSMap *out, void *user_dat
     int transform = vsapi->mapGetIntSaturated(in, "transform", 0, &err);
     if (err)
         transform = 0;
+    if (transform < 0 || transform > 2)
+        RETERROR("transform must be 0 (comb), 1 (transform) or 2 (hybrid)");
     if (transform && d.standard != COMP_STD_NTSC)
-        RETERROR("transform=1 applies to ntsc (pal always uses the transform)");
+        RETERROR("transform applies to ntsc (pal always uses the transform)");
     if (transform && dimensions != 3)
-        RETERROR("transform=1 needs dimensions=3");
+        RETERROR("transform needs dimensions=3");
     if (eq == 2 && !(d.standard == COMP_STD_PAL ? dimensions >= 2 : transform))
         RETERROR("eq=2 needs a transform separation");
 
@@ -491,10 +493,12 @@ static void VS_CC comp_restore_create(const VSMap *in, VSMap *out, void *user_da
     int transform = vsapi->mapGetIntSaturated(in, "transform", 0, &err);
     if (err)
         transform = 0;
+    if (transform < 0 || transform > 2)
+        RETERROR("transform must be 0 (comb), 1 (transform) or 2 (hybrid)");
     if (transform && d.standard != COMP_STD_NTSC)
-        RETERROR("transform=1 applies to ntsc (pal always uses the transform)");
+        RETERROR("transform applies to ntsc (pal always uses the transform)");
     if (transform && dimensions != 3)
-        RETERROR("transform=1 needs dimensions=3");
+        RETERROR("transform needs dimensions=3");
     if (eq == 2 && !(d.standard == COMP_STD_PAL ? dimensions >= 2 : transform))
         RETERROR("eq=2 needs a transform separation");
 

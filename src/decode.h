@@ -20,6 +20,8 @@ struct comp_decode_scratch_t {
     float *chroma_f;    /* one frame, active raster */
     int16_t *chroma;    /* quantised copy for the fixed-point demod */
     float *conf;        /* eq=2: transform chroma-confidence map */
+    int16_t *chroma2;   /* hybrid: the comb's chroma estimate */
+    uint8_t *mask;      /* hybrid: 1 where the comb's temporal candidate won */
     float *tmp3;        /* NTSC: 2D chroma; in 3D mode, 1D+2D of three frames */
     uint16_t *refine;   /* refine loop: YUV estimate, recomposite, scratch */
 };
@@ -36,7 +38,7 @@ typedef struct comp_decode_t comp_decode_t;
 struct comp_decode_t {
     int standard;
     int dimensions;      /* 1 (crude notch), 2, or 3 */
-    int use_transform;   /* NTSC 3D: transform separation, not the comb */
+    int use_transform;   /* NTSC 3D: 1 transform, 2 comb/transform hybrid */
     int refine;          /* Y-only Landweber iterations, 0 = off */
     int width;
     int height;          /* full raster height: 576 PAL, 486 NTSC */
@@ -65,7 +67,8 @@ struct comp_decode_t {
  * bin-symmetry ratio. eq enables the chroma cascade equalizer; refine
  * is the number of Y-only Landweber refinement iterations against the
  * dimensions=1 model; use_transform selects Transform NTSC separation
- * instead of the comb (NTSC, dimensions=3 only); level selects the
+ * instead of the comb (1) or a per-sample comb/transform hybrid (2)
+ * (NTSC, dimensions=3 only); level selects the
  * transform's amplitude-limiting mode (threshold then unused).
  * eq: 0 off, 1 the fixed cascade inverse, 2 leak-aware (the boost is
  * scaled by the transform's confidence map; needs a transform path). */

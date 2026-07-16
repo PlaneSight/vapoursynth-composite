@@ -534,6 +534,7 @@ int main(void)
     test_3d_roundtrip(COMP_STD_NTSC, 0, 0);
     test_3d_roundtrip(COMP_STD_NTSC, 1, 0);
     test_3d_roundtrip(COMP_STD_NTSC, 1, 1);
+    test_3d_roundtrip(COMP_STD_NTSC, 2, 0);
 
     test_eq();
 

@@ -30,7 +30,10 @@ Alpha. PAL and NTSC round trips work:
   adaptive line comb. `dimensions=3` selects the spatio-temporal
   variants (3D Transform PAL / adaptive 3D comb), which draw on
   neighbouring frames; `transform=1` further swaps the NTSC 3D comb for
-  a Transform NTSC separation, the stronger choice on motion. `eq`
+  a Transform NTSC separation, the stronger choice on motion, and
+  `transform=2` runs both and keeps the comb's chroma wherever its
+  temporal candidate won cleanly (static content) and the transform's
+  elsewhere (motion). `eq`
   (default 1) applies a chroma equalizer that inverts the known
   encode+decode filter cascade, sharpening recovered color; disable it
   for content that is essentially monochrome, where it can amplify

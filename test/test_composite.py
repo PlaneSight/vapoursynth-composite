@@ -346,6 +346,22 @@ core.composite.Decode(core.composite.Encode(bff9, standard='ntsc'),
                       standard='ntsc', dimensions=3, transform=1,
                       eq=2).get_frame(4)
 
+# ---- comb/transform hybrid
+nhy = core.composite.Decode(core.composite.Encode(bff9, standard='ntsc'),
+                            standard='ntsc', dimensions=3, transform=2)
+fr = nhy.get_frame(4)
+for pl, want in enumerate((32128, 40960, 28672)):
+    vals = [fr[pl][r, x] for r in (30, 240, 445) for x in range(64, 656, 8)]
+    worst = max(abs(v - want) for v in vals)
+    assert worst <= 96, ('ntsc-hybrid', pl, want, worst)
+try:
+    core.composite.Decode(core.composite.Encode(bff, standard='ntsc'),
+                          standard='ntsc', dimensions=3, transform=3)
+except vs.Error as e:
+    assert 'transform must be' in str(e)
+else:
+    assert False, 'transform=3 accepted'
+
 for bad_kw, needle in ((dict(eq=3), 'eq must be'),
                        (dict(eq=2, dimensions=1), 'transform separation'),
                        (dict(eq=2, standard='ntsc', dimensions=3),

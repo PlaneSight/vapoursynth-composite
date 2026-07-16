@@ -97,6 +97,8 @@ int comp_decode_init(comp_decode_t *d, int standard, double threshold,
 {
     if (nscratch < 1 || dimensions < 1 || dimensions > 3 || refine < 0)
         return -1;
+    if (use_transform < 0 || use_transform > 2)
+        return -1;
     if (use_transform && (standard != COMP_STD_NTSC || dimensions != 3))
         return -1;
     if (level && (dimensions < 2 || (standard == COMP_STD_NTSC && !use_transform)))
@@ -117,7 +119,7 @@ int comp_decode_init(comp_decode_t *d, int standard, double threshold,
     d->refine = refine;
     d->standard = standard;
     d->dimensions = dimensions;
-    d->use_transform = !!use_transform;
+    d->use_transform = use_transform;
     d->eq = eq;
     d->width = enc.width;
     d->height = standard == COMP_STD_PAL ? COMP_ACTIVE_HEIGHT_PAL
@@ -225,6 +227,14 @@ int comp_decode_init(comp_decode_t *d, int standard, double threshold,
                 return -1;
             }
         }
+        if (use_transform == 2) {
+            d->scratch[i].chroma2 = malloc(sizeof(int16_t) * d->width * d->height);
+            d->scratch[i].mask = malloc(d->width * d->height);
+            if (!d->scratch[i].chroma2 || !d->scratch[i].mask) {
+                comp_decode_free(d);
+                return -1;
+            }
+        }
         if (refine > 0) {
             /* YUV estimate (3 planes), recomposite, crude Y, spare */
             d->scratch[i].refine = malloc(sizeof(uint16_t) * d->width * d->height * 6);
@@ -246,6 +256,8 @@ void comp_decode_free(comp_decode_t *d)
             free(d->scratch[i].chroma_f);
             free(d->scratch[i].chroma);
             free(d->scratch[i].conf);
+            free(d->scratch[i].chroma2);
+            free(d->scratch[i].mask);
             free(d->scratch[i].tmp3);
             free(d->scratch[i].refine);
         }
@@ -672,7 +684,7 @@ static void ntsc_split3d(const comp_decode_t *d, int rows, int row_off,
  * (may be NULL) is the transform's confidence row for the eq=2 blend. */
 static void ntsc_demod_line(const comp_decode_t *d, int frame, int raster_row,
                             const uint16_t *comp_row, const int16_t *chroma_row,
-                            const float *conf,
+                            const float *conf, const uint8_t *mask,
                             uint16_t *outy, uint16_t *outu, uint16_t *outv)
 {
     const int w = d->width;
@@ -717,9 +729,12 @@ static void ntsc_demod_line(const comp_decode_t *d, int frame, int raster_row,
         /* comb mode follows comb.cpp adjustY (subtract the filtered
          * chroma resynthesized on the carrier, using the values before
          * equalization); transform mode subtracts the separated chroma
-         * directly, as Transform PAL does */
+         * directly, as Transform PAL does. The hybrid picks per sample
+         * from the source that produced the chroma. */
         int32_t yl;
-        if (d->use_transform) {
+        const int direct = d->use_transform == 1
+                           || (d->use_transform == 2 && !mask[x]);
+        if (direct) {
             yl = (int32_t)comp_row[x] - chroma_row[x];
         } else {
             const int32_t re = (ul * s4[x & 3] + vl * c4[x & 3] + 16384) >> 15;
@@ -970,6 +985,56 @@ void comp_decode_frame(comp_decode_t *d, int frame, int nframes,
                                    s->conf, s->conf ? s->conf + w : NULL);
             for (int i = 0; i < w * rows; i++)
                 s->chroma[i] = clamp_i16(lrintf(s->chroma_f[i]));
+
+            if (d->use_transform == 2) {
+                /* the hybrid: run the adaptive comb on the center three
+                 * frames and keep its chroma wherever a temporal
+                 * candidate won cleanly (static content) */
+                const float *c1[3], *c2[3];
+                for (int k = 0; k < 3; k++) {
+                    float *b1 = s->tmp3 + k * w * d->height;
+                    float *b2 = s->tmp3 + (3 + k) * w * d->height;
+                    ntsc_comb1d(d, rows, views[look - 1 + k].data,
+                                views[look - 1 + k].stride, b1);
+                    ntsc_comb2d(d, rows, b1, b2);
+                    c1[k] = b1;
+                    c2[k] = b2;
+                }
+                ntsc_split3d(d, rows, row_off, views + look - 1,
+                             view_frames + look - 1, c1, c2, s->chroma2);
+                /* route on motion, not on the comb's own confidence:
+                 * frames two apart share subcarrier phase, so their
+                 * difference sees content change and no chroma. Where
+                 * the neighborhood is still, the comb is the better
+                 * decoder wholesale; where it moves, the transform is.
+                 * Baked-in crawl that itself moves reads as motion and
+                 * routes to the transform — a conservative choice. */
+                const int32_t margin = d->comb_krange / 16;
+                const uint16_t *p2 = views[look - 2].data;
+                const uint16_t *n2 = views[look + 2].data;
+                const ptrdiff_t p2s = views[look - 2].stride;
+                const ptrdiff_t n2s = views[look + 2].stride;
+                for (int r = 0; r < rows; r++) {
+                    const uint16_t *cur = comp + r * comp_stride;
+                    const uint16_t *pr = p2 + r * p2s;
+                    const uint16_t *nx = n2 + r * n2s;
+                    uint8_t *mk = s->mask + r * w;
+                    for (int x = 0; x < w; x++) {
+                        int32_t motion = 0;
+                        const int lo = x < 2 ? -x : -2;
+                        const int hi = x >= w - 2 ? w - 1 - x : 2;
+                        for (int o = lo; o <= hi; o++) {
+                            const int32_t a = abs((int)cur[x + o] - (int)pr[x + o]);
+                            const int32_t b = abs((int)cur[x + o] - (int)nx[x + o]);
+                            motion = a > motion ? a : motion;
+                            motion = b > motion ? b : motion;
+                        }
+                        mk[x] = motion < margin;
+                        if (mk[x])
+                            s->chroma[r * w + x] = s->chroma2[r * w + x];
+                    }
+                }
+            }
         } else if (d->dimensions == 2) {
             ntsc_comb1d(d, rows, comp, comp_stride, s->chroma_f);
             ntsc_comb2d(d, rows, s->chroma_f, s->tmp3);
@@ -992,6 +1057,7 @@ void comp_decode_frame(comp_decode_t *d, int frame, int nframes,
             ntsc_demod_line(d, frame, r + row_off,
                             comp + r * comp_stride, s->chroma + r * w,
                             s->conf ? s->conf + r * w : NULL,
+                            d->use_transform == 2 ? s->mask + r * w : NULL,
                             dsty + r * ystride, dstu + r * ustride,
                             dstv + r * vstride);
     }
