@@ -6,9 +6,12 @@
  * half-overlapped in every axis; rows belonging to the other field are
  * filled with black, so the FFT sees the interlaced lattice directly.
  * Bins are kept only if symmetric with their reflection about the
- * chroma carrier at (fsc, 72 c/aph, 18.75 Hz). The reference reflects
- * the temporal axis with offset ZTILE/4 although its own comment says
- * 3*ZTILE/4; the shipped behaviour is ported unchanged.
+ * chroma carrier at (fsc, 72 c/aph, 18.75 Hz). The reference doubts
+ * its own temporal reflection offset (ZTILE/4, with a comment saying
+ * 3*ZTILE/4), but ZTILE/4 is correct: the black-filled lattice holds
+ * the carrier at two alias pairs, and this reflection maps every
+ * sideband to its mirror or the mirror's alias, equal in magnitude
+ * either way. The commented offset pairs sidebands with empty bins.
  */
 
 #include <math.h>
