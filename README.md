@@ -42,40 +42,48 @@ rows 5..484. 486-line input is used as-is.
 ### Decode
 
 ```python
-out = core.composite.Decode(comp, standard="pal", width=720, dimensions=2,
-                            threshold=0.4, setup=0, eq=1, transform=0,
-                            level=0, evidence=0.0)
+out = core.composite.Decode(comp, standard="pal", width=720, dimensions=3,
+                            setup=0, level=1, eq=2)
 ```
 
 Composite GRAY16 back to YUV444P16, resampled to `width`. PAL uses
 Transform PAL chroma separation with PALcolour-style demodulation;
-NTSC uses an adaptive line comb, or Transform NTSC via `transform`.
+NTSC uses an adaptive line comb, a Transform NTSC separation, or a
+motion-routed hybrid of the two via `transform`. The defaults shown
+are the measured best general configuration; unset parameters adapt
+to the chosen path (picking `dimensions=1` or an NTSC comb quietly
+drops `level`/`eq` back to their supported values, and an explicit
+`threshold`, `thresholds`, or `lut` selects its own separation mode).
 
 - `width` — output width (default 720); the resample inverts Encode's
   BT.601↔4×fsc mapping exactly.
-- `dimensions` — `2` (default): 2D separation (spatial tiles / line
-  comb). `3`: spatio-temporal separation (3D Transform PAL / adaptive
-  3D comb) drawing on neighboring frames. `1`: a deliberately crude
-  notch decoder — a worst-case reference, and `Restore`'s degradation
-  model.
+- `dimensions` — `3` (default): spatio-temporal separation (3D
+  Transform PAL / adaptive 3D comb) drawing on neighboring frames;
+  clip-edge frames lean on black temporal padding, and it costs
+  several times 2D's compute. `2`: the fast 2D separation (spatial
+  tiles / line comb). `1`: a deliberately crude notch decoder — a
+  worst-case reference, and `Restore`'s degradation model.
 - `transform` — NTSC with `dimensions=3` only. `1` replaces the 3D
-  comb with a Transform NTSC separation (stronger on motion). `2` runs
-  both and routes per sample on a chroma-transparent motion detector:
-  still neighborhoods take the comb (near-exact on static content),
-  moving ones take the transform.
-- `threshold` — the transform's bin-symmetry ratio (default 0.4,
-  after ld-decode); higher demands more symmetry to call a bin chroma.
+  comb with a Transform NTSC separation (stronger on motion). `2`
+  (default there) runs both and routes per sample on a
+  chroma-transparent motion detector: still neighborhoods take the
+  comb (near-exact on static content), moving ones take the
+  transform. `0`: the plain adaptive comb.
+- `threshold` — the transform's bin-symmetry ratio (0.4 is the
+  ld-decode reference value); higher demands more symmetry to call a
+  bin chroma. Passing it selects threshold mode (`level=0`).
 - `thresholds` — per-bin override of the symmetry test (80 values for
   `dimensions=2`, 768 for 3). For Transform NTSC the values feed the
   shaped-threshold exponent instead. Calibrated sets trained on the
   VQEG corpora ship in `test/`: `thresholds_pal_2d.txt` (beats any
   uniform threshold), `thresholds_pal_3d.txt` (experimental),
   `thresholds_ntsc.txt`.
-- `level` — replace the keep/discard test with amplitude limiting
+- `level` — amplitude limiting instead of the keep/discard test
   (GB 2365247 A's preferred embodiment): each bin pair's larger
   magnitude is reduced to the smaller, phase preserved. Measurably
-  better on moving content and real footage; slightly softer on static
-  synthetic detail. `threshold`/`thresholds` are unused.
+  better on moving content and real footage; slightly softer on
+  static synthetic detail. Default on wherever a transform separation
+  is present and no `threshold`/`thresholds`/`lut` was given.
 - `lut` — trained soft separation (after US 7,872,689): per frequency
   bin, a gain over the pair-symmetry ratio, 16 knots per bin (1280
   values for `dimensions=2`, 12288 for 3; transform separations only).
@@ -84,13 +92,14 @@ NTSC uses an adaptive line comb, or Transform NTSC via `transform`.
   `test/lut_ntsc.txt`. Strongest on natural content; the untrained
   modes are safer on synthetic extremes.
 - `eq` — chroma equalization of the known encode+decode filter
-  cascade. `0` off; `1` (default) the fixed inverse, +1.7 dB chroma
-  PSNR on color detail but it amplifies separation leak on
-  near-monochrome content; `2` (transform paths only) steers total
-  chroma bandwidth per sample by the transform's own pair-symmetry
+  cascade. `0` off; `1` the fixed inverse, +1.7 dB chroma PSNR on
+  color detail but it amplifies separation leak on near-monochrome
+  content; `2` (default on transform paths) steers total chroma
+  bandwidth per sample by the transform's own pair-symmetry
   confidence, from a sub-nominal low-pass where the kept chroma is
   suspect up to the full boosted inverse where it is confirmed — the
-  robust choice for unknown or mixed content.
+  robust choice for unknown or mixed content. Paths without a
+  transform default to `1`.
 - `evidence` — the low-frequency luma prior of US 7,872,689 (PAL
   transforms, default 0 = off): pairs whose baseband difference
   frequency has no LF luma partner are attenuated by
@@ -122,20 +131,20 @@ Measured on the supervised harness (`test/metrics.py`), VQEG held-out
 clips, and real footage; artifact numbers are chroma HF energy and
 temporal flicker in the worst-artifact regions:
 
-- Start with the defaults (`dimensions=2, eq=1`). Move to
-  `dimensions=3` when the source is available as a clip (not stills):
-  the temporal axis is the single largest flicker reduction.
-- For unknown or mixed real footage, the measured best general
-  configuration is `dimensions=3, level=1, eq=2` (add `evidence=1.0`
-  for artifact-heavy material) — on the reference clip it removes
-  ~42% of hot-spot chroma HF and ~50% of flicker versus doing
-  nothing, where the original 2D threshold decode managed 25%/20%.
+- The defaults are the measured best general configuration
+  (`dimensions=3, level=1, eq=2`, NTSC additionally `transform=2`) —
+  on the reference clip they remove ~42% of hot-spot chroma HF and
+  ~50% of flicker versus doing nothing, where a plain 2D threshold
+  decode manages 25%/20%. Add `evidence=1.0` for artifact-heavy
+  material.
+- `dimensions=2` is the fast path, and the right one for stills or
+  very short clips (the 3D window spans ±3 frames).
 - `lut` with the shipped trained tables wins on natural content
   (best-in-class artifact scores on every held-out VQEG clip) but can
   overreach on synthetic extremes such as zone plates.
-- NTSC: the adaptive comb is near-exact on static content, the
-  transform wins on motion; `transform=2` routes between them and is
-  never the worst.
+- NTSC: the default hybrid is never the worst; `transform=0` (comb)
+  is near-exact on fully static content, `transform=1` strongest on
+  motion.
 
 ## Recipes
 
@@ -149,7 +158,7 @@ chroma degrain after the decode cancels exactly that. With
 [vapoursynth-mvutensils](https://pypi.org/project/vapoursynth-mvutensils/):
 
 ```python
-dec = core.composite.Restore(clip, dimensions=3, level=1, eq=2)
+dec = core.composite.Restore(clip)
 sup = core.mvu.Super(dec, blksize=16, overlap=8, pel=2)
 vec = core.mvu.AnalyseMany(sup, radius=2)
 out = core.mvu.Degrain(dec, sup, vec, planes=[1, 2], thsad=[400, 1600])

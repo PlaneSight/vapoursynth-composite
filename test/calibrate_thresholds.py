@@ -236,6 +236,10 @@ def optimal_thresholds(hist_lum, hist_chr, alpha):
 
 
 def evaluate(name, comp_nr, clean, **kw):
+    # the rows compare separation modes at fixed eq/level; the plugin's
+    # adaptive defaults would otherwise change what each label means
+    kw.setdefault('eq', 1)
+    kw.setdefault('level', 0)
     out = to_array(core.composite.Decode(gray_clip(comp_nr), standard=STANDARD, **kw))
     res = score(out, clean)
     print(f"  {name:18s} PSNR Y {res['psnr_Y']:6.2f}  U {res['psnr_U']:6.2f}  "

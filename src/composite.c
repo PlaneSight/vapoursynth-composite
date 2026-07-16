@@ -278,6 +278,7 @@ static void VS_CC comp_decode_create(const VSMap *in, VSMap *out, void *user_dat
         RETERROR("width must be between 16 and 8192");
 
     double threshold = vsapi->mapGetFloat(in, "threshold", 0, &err);
+    const int threshold_unset = err;
     if (err)
         threshold = 0.4;
     if (!(threshold > 0.0 && threshold <= 1.0))
@@ -287,11 +288,12 @@ static void VS_CC comp_decode_create(const VSMap *in, VSMap *out, void *user_dat
 
     int dimensions = vsapi->mapGetIntSaturated(in, "dimensions", 0, &err);
     if (err)
-        dimensions = 2;
+        dimensions = 3;
     if (dimensions < 1 || dimensions > 3)
         RETERROR("dimensions must be 1, 2 or 3");
 
     int eq = vsapi->mapGetIntSaturated(in, "eq", 0, &err);
+    const int eq_unset = err;
     if (err)
         eq = 1;
     if (eq < 0 || eq > 2)
@@ -303,19 +305,30 @@ static void VS_CC comp_decode_create(const VSMap *in, VSMap *out, void *user_dat
 
     int transform = vsapi->mapGetIntSaturated(in, "transform", 0, &err);
     if (err)
-        transform = 0;
+        transform = (d.standard == COMP_STD_NTSC && dimensions == 3) ? 2 : 0;
     if (transform < 0 || transform > 2)
         RETERROR("transform must be 0 (comb), 1 (transform) or 2 (hybrid)");
     if (transform && d.standard != COMP_STD_NTSC)
         RETERROR("transform applies to ntsc (pal always uses the transform)");
     if (transform && dimensions != 3)
         RETERROR("transform needs dimensions=3");
-    if (eq == 2 && !(d.standard == COMP_STD_PAL ? dimensions >= 2 : transform))
+
+    /* unset level/eq adapt to the chosen path: the measured best
+     * settings wherever a transform separation is present */
+    const int has_transform = d.standard == COMP_STD_PAL ? dimensions >= 2
+                                                         : transform != 0;
+    if (eq_unset && has_transform)
+        eq = 2;
+    if (eq == 2 && !has_transform)
         RETERROR("eq=2 needs a transform separation");
 
+    /* an explicit threshold, thresholds, or lut selects its own mode,
+     * so the level default only applies in their absence */
     int level = vsapi->mapGetIntSaturated(in, "level", 0, &err);
     if (err)
-        level = 0;
+        level = has_transform && threshold_unset
+                && vsapi->mapNumElements(in, "thresholds") < 1
+                && vsapi->mapNumElements(in, "lut") < 1 ? 1 : 0;
     if (level && dimensions < 2)
         RETERROR("level=1 needs dimensions 2 or 3");
     if (level && d.standard == COMP_STD_NTSC && !transform)
@@ -473,6 +486,7 @@ static void VS_CC comp_restore_create(const VSMap *in, VSMap *out, void *user_da
         RETERROR("width must be between 16 and 8192");
 
     double threshold = vsapi->mapGetFloat(in, "threshold", 0, &err);
+    const int threshold_unset = err;
     if (err)
         threshold = 0.4;
     if (!(threshold > 0.0 && threshold <= 1.0))
@@ -480,11 +494,12 @@ static void VS_CC comp_restore_create(const VSMap *in, VSMap *out, void *user_da
 
     int dimensions = vsapi->mapGetIntSaturated(in, "dimensions", 0, &err);
     if (err)
-        dimensions = 2;
+        dimensions = 3;
     if (dimensions < 1 || dimensions > 3)
         RETERROR("dimensions must be 1, 2 or 3");
 
     int eq = vsapi->mapGetIntSaturated(in, "eq", 0, &err);
+    const int eq_unset = err;
     if (err)
         eq = 1;
     if (eq < 0 || eq > 2)
@@ -500,19 +515,30 @@ static void VS_CC comp_restore_create(const VSMap *in, VSMap *out, void *user_da
 
     int transform = vsapi->mapGetIntSaturated(in, "transform", 0, &err);
     if (err)
-        transform = 0;
+        transform = (d.standard == COMP_STD_NTSC && dimensions == 3) ? 2 : 0;
     if (transform < 0 || transform > 2)
         RETERROR("transform must be 0 (comb), 1 (transform) or 2 (hybrid)");
     if (transform && d.standard != COMP_STD_NTSC)
         RETERROR("transform applies to ntsc (pal always uses the transform)");
     if (transform && dimensions != 3)
         RETERROR("transform needs dimensions=3");
-    if (eq == 2 && !(d.standard == COMP_STD_PAL ? dimensions >= 2 : transform))
+
+    /* unset level/eq adapt to the chosen path: the measured best
+     * settings wherever a transform separation is present */
+    const int has_transform = d.standard == COMP_STD_PAL ? dimensions >= 2
+                                                         : transform != 0;
+    if (eq_unset && has_transform)
+        eq = 2;
+    if (eq == 2 && !has_transform)
         RETERROR("eq=2 needs a transform separation");
 
+    /* an explicit threshold, thresholds, or lut selects its own mode,
+     * so the level default only applies in their absence */
     int level = vsapi->mapGetIntSaturated(in, "level", 0, &err);
     if (err)
-        level = 0;
+        level = has_transform && threshold_unset
+                && vsapi->mapNumElements(in, "thresholds") < 1
+                && vsapi->mapNumElements(in, "lut") < 1 ? 1 : 0;
     if (level && dimensions < 2)
         RETERROR("level=1 needs dimensions 2 or 3");
     if (level && d.standard == COMP_STD_NTSC && !transform)

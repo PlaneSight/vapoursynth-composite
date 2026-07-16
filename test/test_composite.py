@@ -110,7 +110,7 @@ assert bytes(enc_bff.get_frame(0)[0]) != bytes(enc_tff.get_frame(0)[0])
 
 # ---- NTSC round trip, both field orders and with setup
 for enc_clip in (enc_bff, enc_tff):
-    dec = core.composite.Decode(enc_clip, standard='ntsc')
+    dec = core.composite.Decode(enc_clip, standard='ntsc', dimensions=2)
     assert (dec.width, dec.height, dec.format.id) == (720, 480, vs.YUV444P16)
     fr = dec.get_frame(1)
     for p, want in enumerate((32128, 40960, 28672)):
@@ -119,7 +119,7 @@ for enc_clip in (enc_bff, enc_tff):
         assert worst <= 96, (p, want, worst)
 
 dec = core.composite.Decode(core.composite.Encode(bff, standard='ntsc', setup=1),
-                            standard='ntsc', setup=1)
+                            standard='ntsc', setup=1, dimensions=2)
 fr = dec.get_frame(1)
 for p, want in enumerate((32128, 40960, 28672)):
     vals = [fr[p][r, x] for r in (30, 240, 445) for x in range(64, 656, 8)]
@@ -156,7 +156,7 @@ for pl, want in enumerate((32128, 40960, 28672)):
     assert worst <= 64, ('pal3d', pl, want, worst)
 
 dec3n = core.composite.Decode(core.composite.Encode(bff, standard='ntsc'),
-                              standard='ntsc', dimensions=3)
+                              standard='ntsc', dimensions=3, transform=0)
 fr = dec3n.get_frame(1)
 for pl, want in enumerate((32128, 40960, 28672)):
     vals = [fr[pl][r, x] for r in (30, 240, 445) for x in range(64, 656, 8)]
@@ -217,11 +217,31 @@ else:
     assert False, 'transform=1 accepted for pal'
 try:
     core.composite.Decode(core.composite.Encode(bff, standard='ntsc'),
-                          standard='ntsc', transform=1)
+                          standard='ntsc', dimensions=2, transform=1)
 except vs.Error as e:
     assert 'dimensions=3' in str(e)
 else:
     assert False, 'transform without dimensions=3 accepted'
+
+# ---- defaults are the measured best settings, and adapt to the path
+d_def = core.composite.Decode(core.composite.Encode(pal_src))
+d_exp = core.composite.Decode(core.composite.Encode(pal_src),
+                              dimensions=3, level=1, eq=2)
+for pl in range(3):
+    assert bytes(d_def.get_frame(4)[pl]) == bytes(d_exp.get_frame(4)[pl])
+n_def = core.composite.Decode(core.composite.Encode(bff9, standard='ntsc'),
+                              standard='ntsc')
+n_exp = core.composite.Decode(core.composite.Encode(bff9, standard='ntsc'),
+                              standard='ntsc', dimensions=3, transform=2,
+                              level=1, eq=2)
+for pl in range(3):
+    assert bytes(n_def.get_frame(4)[pl]) == bytes(n_exp.get_frame(4)[pl])
+# an explicit threshold implies threshold mode (level default drops to 0)
+t_def = core.composite.Decode(core.composite.Encode(pal_src), threshold=0.4)
+t_exp = core.composite.Decode(core.composite.Encode(pal_src),
+                              dimensions=3, level=0, eq=2, threshold=0.4)
+for pl in range(3):
+    assert bytes(t_def.get_frame(4)[pl]) == bytes(t_exp.get_frame(4)[pl])
 
 # ---- precomb: flat chroma unchanged, vertical chroma detail differs
 flat_pc = core.composite.Encode(flat([30000, 40960, 28672]))
@@ -234,15 +254,15 @@ assert bytes(core.composite.Encode(vstripes).get_frame(0)[0]) != \
 core.composite.Restore(tex, precomb=1).get_frame(0)
 
 # ---- per-bin thresholds: uniform list matches the scalar exactly
-tl = core.composite.Decode(enc_t, thresholds=[0.4] * 80)
-ts = core.composite.Decode(enc_t, threshold=0.4)
+tl = core.composite.Decode(enc_t, dimensions=2, thresholds=[0.4] * 80)
+ts = core.composite.Decode(enc_t, dimensions=2, threshold=0.4)
 for pl in range(3):
     assert bytes(tl.get_frame(0)[pl]) == bytes(ts.get_frame(0)[pl])
-assert bytes(core.composite.Decode(enc_t, thresholds=[0.9] * 80).get_frame(0)[1]) != \
+assert bytes(core.composite.Decode(enc_t, dimensions=2, thresholds=[0.9] * 80).get_frame(0)[1]) != \
        bytes(ts.get_frame(0)[1])
-for bad_kw, needle in ((dict(thresholds=[0.4] * 79), '80'),
+for bad_kw, needle in ((dict(dimensions=2, thresholds=[0.4] * 79), '80'),
                        (dict(thresholds=[0.4] * 80, dimensions=3), '768'),
-                       (dict(thresholds=[1.5] * 80), '(0, 1]')):
+                       (dict(dimensions=2, thresholds=[1.5] * 80), '(0, 1]')):
     try:
         core.composite.Decode(enc_t, **bad_kw)
     except vs.Error as e:
@@ -258,7 +278,7 @@ else:
     assert False, 'refine=99 accepted'
 
 # ---- level mode: amplitude limiting instead of the threshold test
-lv = core.composite.Decode(enc_t, level=1)
+lv = core.composite.Decode(enc_t, dimensions=2, level=1)
 fr = lv.get_frame(0)
 for pl, want in enumerate((30000, 40960, 28672)):
     vals = [fr[pl][r, x] for r in (100, 288, 475) for x in range(48, 312, 8)]
@@ -276,8 +296,8 @@ for pl, want in enumerate((32128, 40960, 28672)):
     worst = max(abs(v - want) for v in vals)
     assert worst <= 96, ('ntsc-transform3d-level', pl, want, worst)
 for bad_kw, needle in ((dict(level=1, dimensions=1), 'dimensions 2 or 3'),
-                       (dict(level=1, standard='ntsc', dimensions=3), 'transform separation'),
-                       (dict(level=1, thresholds=[0.4] * 80), 'level=0')):
+                       (dict(level=1, standard='ntsc', dimensions=3, transform=0), 'transform separation'),
+                       (dict(level=1, dimensions=2, thresholds=[0.4] * 80), 'level=0')):
     try:
         core.composite.Decode(core.composite.Encode(bff, standard='ntsc')
                               if bad_kw.get('standard') == 'ntsc' else enc_t,
@@ -288,20 +308,20 @@ for bad_kw, needle in ((dict(level=1, dimensions=1), 'dimensions 2 or 3'),
         assert False, f'expected error: {needle}'
 
 # ---- trained soft LUT: all-ones keeps everything; validation errors
-lut1 = core.composite.Decode(enc_t, lut=[1.0] * 1280)
+lut1 = core.composite.Decode(enc_t, dimensions=2, lut=[1.0] * 1280)
 fr = lut1.get_frame(0)
 for pl, want in enumerate((30000, 40960, 28672)):
     vals = [fr[pl][r, x] for r in (100, 288, 475) for x in range(48, 312, 8)]
     worst = max(abs(v - want) for v in vals)
     assert worst <= 96, ('pal2d-lut', pl, want, worst)
 core.composite.Decode(enc_t, lut=[1.0] * 12288, dimensions=3).get_frame(0)
-core.composite.Restore(tex, lut=[1.0] * 1280).get_frame(0)
-for bad_kw, needle in ((dict(lut=[1.0] * 100), '1280'),
+core.composite.Restore(tex, dimensions=2, lut=[1.0] * 1280).get_frame(0)
+for bad_kw, needle in ((dict(dimensions=2, lut=[1.0] * 100), '1280'),
                        (dict(lut=[1.0] * 100, dimensions=3), '12288'),
-                       (dict(lut=[1.0] * 1280, level=1), 'mutually exclusive'),
-                       (dict(lut=[1.0] * 1280, thresholds=[0.4] * 80),
+                       (dict(dimensions=2, lut=[1.0] * 1280, level=1), 'mutually exclusive'),
+                       (dict(dimensions=2, lut=[1.0] * 1280, thresholds=[0.4] * 80),
                         'mutually exclusive'),
-                       (dict(lut=[2.0] * 1280), '[0, 1]'),
+                       (dict(dimensions=2, lut=[2.0] * 1280), '[0, 1]'),
                        (dict(lut=[1.0] * 1280, dimensions=1), 'dimensions 2 or 3')):
     try:
         core.composite.Decode(enc_t, **bad_kw)
@@ -315,7 +335,8 @@ ntf_lut = core.composite.Decode(core.composite.Encode(bff9, standard='ntsc'),
 ntf_lut.get_frame(4)
 try:
     core.composite.Decode(core.composite.Encode(bff, standard='ntsc'),
-                          standard='ntsc', dimensions=3, lut=[1.0] * 12288)
+                          standard='ntsc', dimensions=3, transform=0,
+                          lut=[1.0] * 12288)
 except vs.Error as e:
     assert 'transform separation' in str(e)
 else:
@@ -326,7 +347,7 @@ core.composite.Decode(core.composite.Encode(bff9, standard='ntsc'),
                       thresholds=[0.4] * 768).get_frame(4)
 try:
     core.composite.Decode(core.composite.Encode(bff, standard='ntsc'),
-                          standard='ntsc', dimensions=3,
+                          standard='ntsc', dimensions=3, transform=0,
                           thresholds=[0.4] * 768)
 except vs.Error as e:
     assert 'transform separation' in str(e)
@@ -387,7 +408,7 @@ else:
 
 for bad_kw, needle in ((dict(eq=3), 'eq must be'),
                        (dict(eq=2, dimensions=1), 'transform separation'),
-                       (dict(eq=2, standard='ntsc', dimensions=3),
+                       (dict(eq=2, standard='ntsc', dimensions=3, transform=0),
                         'transform separation')):
     try:
         core.composite.Decode(core.composite.Encode(bff, standard='ntsc')

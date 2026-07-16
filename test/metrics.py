@@ -268,45 +268,54 @@ def main():
 
             recomp = core.composite.Encode(clip_from(degraded), standard=standard)
             if standard == 'pal':
-                configs = [('NR 2D t=0.4', dict(dimensions=2, threshold=0.4)),
-                           ('NR 2D eq=0', dict(dimensions=2, eq=0)),
-                           ('NR 2D eq=2', dict(dimensions=2, eq=2)),
-                           ('NR 2D t=0.7', dict(dimensions=2, threshold=0.7)),
-                           ('NR 2D level', dict(dimensions=2, level=1)),
-                           ('NR 3D t=0.4', dict(dimensions=3, threshold=0.4)),
-                           ('NR 3D t=0.7', dict(dimensions=3, threshold=0.7)),
-                           ('NR 3D level', dict(dimensions=3, level=1)),
-                           ('NR 3D eq=2', dict(dimensions=3, eq=2))]
+                configs = [('NR 2D t=0.4', dict(dimensions=2, threshold=0.4, eq=1)),
+                           ('NR 2D eq=0', dict(dimensions=2, level=0, eq=0)),
+                           ('NR 2D eq=2', dict(dimensions=2, level=0, eq=2)),
+                           ('NR 2D t=0.7', dict(dimensions=2, threshold=0.7, eq=1)),
+                           ('NR 2D level', dict(dimensions=2, level=1, eq=1)),
+                           ('NR 3D t=0.4', dict(dimensions=3, threshold=0.4, eq=1)),
+                           ('NR 3D t=0.7', dict(dimensions=3, threshold=0.7, eq=1)),
+                           ('NR 3D level', dict(dimensions=3, level=1, eq=1)),
+                           ('NR 3D eq=2', dict(dimensions=3, level=0, eq=2)),
+                           ('NR default', dict())]
             else:
                 configs = [('NR 2D', dict(dimensions=2)),
                            ('NR 2D eq=0', dict(dimensions=2, eq=0)),
-                           ('NR 3D', dict(dimensions=3)),
-                           ('NR 3D transform', dict(dimensions=3, transform=1)),
-                           ('NR 3D tf level', dict(dimensions=3, transform=1, level=1)),
-                           ('NR 3D tf eq=2', dict(dimensions=3, transform=1, eq=2)),
-                           ('NR 3D hybrid', dict(dimensions=3, transform=2))]
+                           ('NR 3D comb', dict(dimensions=3, transform=0)),
+                           ('NR 3D transform', dict(dimensions=3, transform=1,
+                                                    level=0, eq=1)),
+                           ('NR 3D tf level', dict(dimensions=3, transform=1,
+                                                   level=1, eq=1)),
+                           ('NR 3D tf eq=2', dict(dimensions=3, transform=1,
+                                                  level=0, eq=2)),
+                           ('NR 3D hybrid', dict(dimensions=3, transform=2,
+                                                 level=0, eq=1)),
+                           ('NR default', dict())]
             for cname, kw in configs:
                 nr = to_array(core.composite.Decode(recomp, standard=standard, **kw))
                 print(fmt(cname, score(nr, clean)))
 
             for rn in (1, 2, 4):
                 rest = to_array(core.composite.Restore(clip_from(degraded),
-                                                       standard=standard, refine=rn))
+                                                       standard=standard, refine=rn,
+                                                       dimensions=2, level=0, eq=1))
                 print(fmt(f'Restore r={rn}', score(rest, clean)))
 
             recomp_pc = core.composite.Encode(clip_from(degraded), standard=standard,
                                               precomb=1)
-            nr_pc = to_array(core.composite.Decode(recomp_pc, standard=standard))
+            nr_pc = to_array(core.composite.Decode(recomp_pc, standard=standard,
+                                                   dimensions=2, level=0, eq=1))
             print(fmt('NR 2D precomb', score(nr_pc, clean)))
 
             transparent = to_array(core.composite.Decode(
-                core.composite.Encode(clean_clip, standard=standard), standard=standard))
+                core.composite.Encode(clean_clip, standard=standard), standard=standard,
+                dimensions=2, level=0, eq=1))
             print(fmt('transparency 2D', score(transparent, clean)))
 
             if standard == 'pal':
                 transparent_lv = to_array(core.composite.Decode(
                     core.composite.Encode(clean_clip, standard=standard),
-                    standard=standard, level=1))
+                    standard=standard, dimensions=2, level=1, eq=1))
                 print(fmt('transparency 2D level', score(transparent_lv, clean)))
 
 
