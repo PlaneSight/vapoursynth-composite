@@ -38,10 +38,12 @@ Alpha. PAL and NTSC round trips work:
   encode+decode filter cascade, sharpening recovered color; disable it
   for content that is essentially monochrome, where it can amplify
   chroma leakage instead — or use `eq=2` (PAL transforms and Transform
-  NTSC), which scales the boost per sample by the transform's own
-  pair-symmetry confidence: it keeps most of the sharpening on real
-  color while cutting most of the leak amplification, the right choice
-  when the content is unknown or mixed.
+  NTSC), which steers total chroma bandwidth per sample by the
+  transform's own pair-symmetry confidence, from a sub-nominal
+  low-pass where the kept chroma is suspect up to the full boosted
+  inverse where it is confirmed: real color keeps most of the
+  sharpening, residual leak is narrowed away, the right choice when
+  the content is unknown or mixed.
   `dimensions=1` is a deliberately crude notch
   decoder, useful as a worst-case reference and as the degradation model
   of `Restore`. `thresholds` overrides the Transform PAL bin-symmetry

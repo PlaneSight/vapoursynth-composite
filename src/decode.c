@@ -91,6 +91,45 @@ static void design_eq(comp_decode_t *d, const int16_t *enc_taps, int enc_n,
         d->eq_q15[j] = (int32_t)lrint(h[j] * (heq[0] / dc) * 32768.0);
 }
 
+/* the eq=2 blend's sub-nominal low end: ~600 kHz Hann-windowed sinc
+ * on the demodulated U/V, Q15, DC-exact */
+static void design_narrow(comp_decode_t *d, double fs_hz)
+{
+    const double cut = 600000.0 / fs_hz;
+    const int c = COMP_NARROW_TAPS / 2;
+    double h[COMP_NARROW_TAPS];
+    double sum = 0.0;
+
+    for (int j = 0; j < COMP_NARROW_TAPS; j++) {
+        const double k = j - c;
+        const double sinc = k == 0.0 ? 2.0 * cut
+                                     : sin(2.0 * M_PI * cut * k) / (M_PI * k);
+        h[j] = sinc * (0.5 + 0.5 * cos(M_PI * k / (c + 1)));
+        sum += h[j];
+    }
+    int32_t total = 0;
+    for (int j = 0; j < COMP_NARROW_TAPS; j++) {
+        d->narrow_q15[j] = (int32_t)lrint(h[j] / sum * 32768.0);
+        total += d->narrow_q15[j];
+    }
+    d->narrow_q15[c] += 32768 - total;
+}
+
+static void narrow_row(const comp_decode_t *d, const int32_t *in, int32_t *out, int w)
+{
+    const int half = COMP_NARROW_TAPS / 2;
+
+    for (int x = 0; x < w; x++) {
+        int64_t acc = 0;
+        for (int j = 0; j < COMP_NARROW_TAPS; j++) {
+            const int k = x + j - half;
+            if (k >= 0 && k < w)
+                acc += (int64_t)d->narrow_q15[j] * in[k];
+        }
+        out[x] = (int32_t)((acc + 16384) >> 15);
+    }
+}
+
 int comp_decode_init(comp_decode_t *d, int standard, double threshold,
                      int nscratch, int setup, int dimensions, int eq, int refine,
                      int use_transform, int level, double evidence)
@@ -124,6 +163,9 @@ int comp_decode_init(comp_decode_t *d, int standard, double threshold,
     d->dimensions = dimensions;
     d->use_transform = use_transform;
     d->eq = eq;
+    if (eq == 2)
+        design_narrow(d, standard == COMP_STD_PAL ? 4.0 * 4433618.75
+                                                  : 4.0 * 3579545.0);
     d->width = enc.width;
     d->height = standard == COMP_STD_PAL ? COMP_ACTIVE_HEIGHT_PAL
                                          : COMP_ACTIVE_HEIGHT_NTSC;
@@ -479,25 +521,29 @@ static void pal_decode_field(const comp_decode_t *d, int frame, int field,
             outy[x] = clamp_u16(4096 + rdiv((int64_t)(yl - d->level_black) * d->luma_num, d->luma_den));
         }
 
-        const int32_t *u_out = u_row, *v_out = v_row;
+        int32_t *u_out = u_row, *v_out = v_row;
         if (d->eq) {
             eq_row(d, u_row, u_eq, w);
             eq_row(d, v_row, v_eq, w);
             if (d->eq == 2 && conf) {
-                /* scale the boost by the separation's confidence: full
-                 * where the kept pairs were symmetric (real chroma),
-                 * none where they were marginal or absent. Real chroma
-                 * measures ~0.94 mean ratio and leak ~0.3-0.8, so the
-                 * fourth power widens the gap (0.79 vs under 0.1). */
+                /* the confidence steers total chroma bandwidth: the
+                 * blend runs from a sub-nominal low-pass (marginal or
+                 * absent pairs: residual leak narrowed away) up to the
+                 * boosted cascade inverse (symmetric pairs, ~0.94 mean
+                 * ratio; leak measures 0.3-0.8, and the fourth power
+                 * widens the gap). */
+                int32_t u_nar[WIDTH], v_nar[WIDTH];
+                narrow_row(d, u_row, u_nar, w);
+                narrow_row(d, v_row, v_nar, w);
                 const float *cw = conf + fr * chroma_stride;
                 for (int x = 0; x < w; x++) {
                     const float c2 = cw[x] * cw[x];
                     int32_t wq = (int32_t)lrintf(c2 * c2 * 32768.0f);
                     wq = wq < 0 ? 0 : wq > 32768 ? 32768 : wq;
-                    u_eq[x] = u_row[x]
-                        + (int32_t)(((int64_t)wq * (u_eq[x] - u_row[x])) >> 15);
-                    v_eq[x] = v_row[x]
-                        + (int32_t)(((int64_t)wq * (v_eq[x] - v_row[x])) >> 15);
+                    u_eq[x] = u_nar[x]
+                        + (int32_t)(((int64_t)wq * (u_eq[x] - u_nar[x])) >> 15);
+                    v_eq[x] = v_nar[x]
+                        + (int32_t)(((int64_t)wq * (v_eq[x] - v_nar[x])) >> 15);
                 }
             }
             u_out = u_eq;
@@ -749,21 +795,24 @@ static void ntsc_demod_line(const comp_decode_t *d, int frame, int raster_row,
         outy[x] = clamp_u16(4096 + rdiv((int64_t)(yl - d->level_black) * d->luma_num, d->luma_den));
     }
 
-    const int32_t *u_out = u_row, *v_out = v_row;
+    int32_t *u_out = u_row, *v_out = v_row;
     if (d->eq) {
         eq_row(d, u_row, u_eq, w);
         eq_row(d, v_row, v_eq, w);
         if (d->eq == 2 && conf) {
-            /* the PAL blend: boost scaled by the fourth power of the
-             * transform's pair-symmetry confidence */
+            /* the PAL blend: confidence steers bandwidth from the
+             * sub-nominal low-pass up to the boosted cascade inverse */
+            int32_t u_nar[COMP_ACTIVE_WIDTH_NTSC], v_nar[COMP_ACTIVE_WIDTH_NTSC];
+            narrow_row(d, u_row, u_nar, w);
+            narrow_row(d, v_row, v_nar, w);
             for (int x = 0; x < w; x++) {
                 const float c2 = conf[x] * conf[x];
                 int32_t wq = (int32_t)lrintf(c2 * c2 * 32768.0f);
                 wq = wq < 0 ? 0 : wq > 32768 ? 32768 : wq;
-                u_eq[x] = u_row[x]
-                    + (int32_t)(((int64_t)wq * (u_eq[x] - u_row[x])) >> 15);
-                v_eq[x] = v_row[x]
-                    + (int32_t)(((int64_t)wq * (v_eq[x] - v_row[x])) >> 15);
+                u_eq[x] = u_nar[x]
+                    + (int32_t)(((int64_t)wq * (u_eq[x] - u_nar[x])) >> 15);
+                v_eq[x] = v_nar[x]
+                    + (int32_t)(((int64_t)wq * (v_eq[x] - v_nar[x])) >> 15);
             }
         }
         u_out = u_eq;

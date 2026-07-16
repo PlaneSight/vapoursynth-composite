@@ -12,6 +12,7 @@
 
 #define COMP_DECODE_FILTER_SIZE 7
 #define COMP_EQ_TAPS 31
+#define COMP_NARROW_TAPS 13
 
 typedef struct comp_decode_scratch_t comp_decode_scratch_t;
 
@@ -49,6 +50,7 @@ struct comp_decode_t {
     int32_t comb_krange;         /* NTSC 2D comb adaptivity range */
     int eq;                      /* equalizer: 0 off, 1 fixed, 2 leak-aware */
     int32_t eq_q15[COMP_EQ_TAPS];
+    int32_t narrow_q15[COMP_NARROW_TAPS];  /* eq=2: sub-nominal chroma LP */
     int16_t sin_q15[COMP_SC_DEN_PAL];
     int32_t cfilt_q16[COMP_DECODE_FILTER_SIZE + 1][4];
     comp_transform2d_t transform;
@@ -70,10 +72,11 @@ struct comp_decode_t {
  * instead of the comb (1) or a per-sample comb/transform hybrid (2)
  * (NTSC, dimensions=3 only); level selects the
  * transform's amplitude-limiting mode (threshold then unused).
- * eq: 0 off, 1 the fixed cascade inverse, 2 leak-aware (the boost is
- * scaled by the transform's confidence map; needs a transform path).
- * evidence > 0 enables the LF-luma prior (PAL transforms only; see
- * transform2d.h). */
+ * eq: 0 off, 1 the fixed cascade inverse, 2 leak-aware (the transform's
+ * confidence map steers chroma bandwidth from a sub-nominal low-pass
+ * through nominal to the boosted cascade inverse; needs a transform
+ * path). evidence > 0 enables the LF-luma prior (PAL transforms only;
+ * see transform2d.h). */
 int comp_decode_init(comp_decode_t *d, int standard, double threshold,
                      int nscratch, int setup, int dimensions, int eq, int refine,
                      int use_transform, int level, double evidence);
