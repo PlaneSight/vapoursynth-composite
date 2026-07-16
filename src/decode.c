@@ -132,9 +132,11 @@ static void narrow_row(const comp_decode_t *d, const int32_t *in, int32_t *out, 
 
 int comp_decode_init(comp_decode_t *d, int standard, double threshold,
                      int nscratch, int setup, int dimensions, int eq, int refine,
-                     int use_transform, int level, double evidence)
+                     int use_transform, int level, double evidence, int cti)
 {
     if (nscratch < 1 || dimensions < 1 || dimensions > 3 || refine < 0)
+        return -1;
+    if (cti && dimensions < 2)
         return -1;
     if (evidence < 0.0 || (evidence > 0.0
                            && (standard != COMP_STD_PAL || dimensions < 2)))
@@ -163,6 +165,7 @@ int comp_decode_init(comp_decode_t *d, int standard, double threshold,
     d->dimensions = dimensions;
     d->use_transform = use_transform;
     d->eq = eq;
+    d->cti = !!cti;
     if (eq == 2)
         design_narrow(d, standard == COMP_STD_PAL ? 4.0 * 4433618.75
                                                   : 4.0 * 3579545.0);
@@ -402,6 +405,61 @@ static void eq_row(const comp_decode_t *d, const int32_t *in, int32_t *out, int 
     }
 }
 
+/* Luma-guided chroma transient improvement: at a coincident
+ * transition, resynthesize the chroma edge from the decoded luma's
+ * transition profile (normalized between its side levels), so the
+ * chroma edge lands where the luma edge is and rises as fast. One
+ * profile drives both U and V (hue cannot rotate across the edge) and
+ * the output is contained between the chroma side levels (cannot
+ * overshoot). Flat chroma and chroma bumps without a step fail the
+ * gates and pass untouched. */
+#define CTI_EDGE_T   3000   /* luma gradient over 2 samples */
+#define CTI_STEP_T   3000   /* minimum chroma step, demod level units */
+#define CTI_D        8      /* chroma blur half-width at 4x fsc */
+
+static void cti_row(const uint16_t *outy, int32_t *u, int32_t *v, int w)
+{
+    int x = CTI_D + 3;
+    while (x < w - CTI_D - 3) {
+        const int32_t gy = (int32_t)outy[x + 1] - (int32_t)outy[x - 1];
+        if (gy < CTI_EDGE_T && gy > -CTI_EDGE_T) {
+            x++;
+            continue;
+        }
+        /* extend over the contiguous edge run */
+        int x1 = x;
+        while (x1 + 1 < w - CTI_D - 3) {
+            const int32_t g2 = (int32_t)outy[x1 + 2] - (int32_t)outy[x1];
+            if (g2 < CTI_EDGE_T && g2 > -CTI_EDGE_T)
+                break;
+            x1++;
+        }
+        const int lo = x - CTI_D, hi = x1 + CTI_D;
+        if (hi >= w - 3)
+            break;
+
+        /* side levels: short averages just beyond the window */
+        const int32_t ya = ((int32_t)outy[lo - 2] + outy[lo - 1] + outy[lo]) / 3;
+        const int32_t yb = ((int32_t)outy[hi] + outy[hi + 1] + outy[hi + 2]) / 3;
+        const int32_t yd = yb - ya;
+        if (yd > 4096 || yd < -4096) {
+            for (int p = 0; p < 2; p++) {
+                int32_t *c = p ? v : u;
+                const int32_t a = (c[lo - 2] + c[lo - 1] + c[lo]) / 3;
+                const int32_t b = (c[hi] + c[hi + 1] + c[hi + 2]) / 3;
+                if (b - a > CTI_STEP_T || a - b > CTI_STEP_T) {
+                    for (int k = lo; k <= hi; k++) {
+                        int64_t sn = (int64_t)((int32_t)outy[k] - ya) * 32768 / yd;
+                        sn = sn < 0 ? 0 : sn > 32768 ? 32768 : sn;
+                        c[k] = a + (int32_t)(((int64_t)(b - a) * sn) >> 15);
+                    }
+                }
+            }
+        }
+        x = hi + 1;
+    }
+}
+
 static inline int32_t rdiv(int64_t num, int32_t den)
 {
     return (int32_t)((num >= 0 ? num + den / 2 : num - den / 2) / den);
@@ -549,6 +607,9 @@ static void pal_decode_field(const comp_decode_t *d, int frame, int field,
             u_out = u_eq;
             v_out = v_eq;
         }
+
+        if (d->cti)
+            cti_row(outy, u_out, v_out, w);
 
         /* invert the encoder's level mappings */
         for (int x = 0; x < w; x++) {
@@ -818,6 +879,9 @@ static void ntsc_demod_line(const comp_decode_t *d, int frame, int raster_row,
         u_out = u_eq;
         v_out = v_eq;
     }
+
+    if (d->cti)
+        cti_row(outy, u_out, v_out, w);
 
     for (int x = 0; x < w; x++) {
         outu[x] = clamp_u16(32768 + rdiv((int64_t)u_out[x] * 32768, d->ku));

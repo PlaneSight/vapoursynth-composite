@@ -49,6 +49,7 @@ struct comp_decode_t {
     int32_t luma_num, luma_den;  /* y16 = 4096 + (level - black) * num/den */
     int32_t comb_krange;         /* NTSC 2D comb adaptivity range */
     int eq;                      /* equalizer: 0 off, 1 fixed, 2 leak-aware */
+    int cti;                     /* luma-guided chroma transient improvement */
     int32_t eq_q15[COMP_EQ_TAPS];
     int32_t narrow_q15[COMP_NARROW_TAPS];  /* eq=2: sub-nominal chroma LP */
     int16_t sin_q15[COMP_SC_DEN_PAL];
@@ -76,10 +77,11 @@ struct comp_decode_t {
  * confidence map steers chroma bandwidth from a sub-nominal low-pass
  * through nominal to the boosted cascade inverse; needs a transform
  * path). evidence > 0 enables the LF-luma prior (PAL transforms only;
- * see transform2d.h). */
+ * see transform2d.h). cti resynthesizes chroma edges from coincident
+ * luma transitions (dimensions >= 2). */
 int comp_decode_init(comp_decode_t *d, int standard, double threshold,
                      int nscratch, int setup, int dimensions, int eq, int refine,
-                     int use_transform, int level, double evidence);
+                     int use_transform, int level, double evidence, int cti);
 void comp_decode_free(comp_decode_t *d);
 
 /* override the Transform PAL per-bin thresholds after init; n must be

@@ -110,6 +110,14 @@ default.
   `e/(e + evidence*b)`. Around 0.5–1 it cuts residual chroma flicker
   on artifact-heavy footage with flat and quiet regions untouched, but
   can soften saturated color edges whose luma is flat.
+- `cti` — luma-guided chroma transient improvement (Faroudja,
+  US 4,504,853; default off): at a coincident transition the chroma
+  edge is resynthesized from the luma edge's profile, restoring edge
+  sharpness beyond the chroma channel bandwidth (color bars gain
+  +6.5 dB V, contained and hue-stable by construction). Meant for
+  graphics-like sources — titles, animation, test material; on natural
+  footage the luma and chroma edges are rarely congruent enough and it
+  measurably hurts, so leave it off there.
 - `setup` — must match the encode.
 
 ### Restore

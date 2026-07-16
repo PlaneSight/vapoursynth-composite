@@ -345,6 +345,10 @@ static void VS_CC comp_decode_create(const VSMap *in, VSMap *out, void *user_dat
     if (evidence > 0.0 && (d.standard != COMP_STD_PAL || dimensions < 2))
         RETERROR("evidence needs a pal transform (dimensions 2 or 3)");
 
+    const int cti = !!vsapi->mapGetIntSaturated(in, "cti", 0, &err);
+    if (cti && dimensions < 2)
+        RETERROR("cti needs dimensions 2 or 3");
+
     const int nlut = vsapi->mapNumElements(in, "lut");
     if (nlut > 0) {
         if (d.standard == COMP_STD_NTSC && !transform)
@@ -387,7 +391,8 @@ static void VS_CC comp_decode_create(const VSMap *in, VSMap *out, void *user_dat
         RETERROR("out of memory");
     if (comp_decode_init(d.dec, d.standard, threshold,
                          info.numThreads < 1 ? 1 : info.numThreads, setup,
-                         dimensions, eq, 0, transform, level, evidence)) {
+                         dimensions, eq, 0, transform, level, evidence,
+                         cti)) {
         free(d.dec);
         d.dec = NULL;
         RETERROR("decoder initialisation failed");
@@ -567,6 +572,10 @@ static void VS_CC comp_restore_create(const VSMap *in, VSMap *out, void *user_da
     if (evidence > 0.0 && (d.standard != COMP_STD_PAL || dimensions < 2))
         RETERROR("evidence needs a pal transform (dimensions 2 or 3)");
 
+    const int cti = !!vsapi->mapGetIntSaturated(in, "cti", 0, &err);
+    if (cti && dimensions < 2)
+        RETERROR("cti needs dimensions 2 or 3");
+
     const int nlut = vsapi->mapNumElements(in, "lut");
     if (nlut > 0) {
         if (d.standard == COMP_STD_NTSC && !transform)
@@ -660,7 +669,7 @@ static void VS_CC comp_restore_create(const VSMap *in, VSMap *out, void *user_da
     if (comp_decode_init(d.dec, d.standard, threshold,
                          info.numThreads < 1 ? 1 : info.numThreads, setup,
                          dimensions, eq, refine, transform, level,
-                         evidence)) {
+                         evidence, cti)) {
         free(d.dec);
         d.dec = NULL;
         RETERROR("decoder initialisation failed");
@@ -766,7 +775,8 @@ VS_EXTERNAL_API(void) VapourSynthPluginInit2(VSPlugin *plugin, const VSPLUGINAPI
                              "transform:int:opt;"
                              "level:int:opt;"
                              "lut:float[]:opt;"
-                             "evidence:float:opt;",
+                             "evidence:float:opt;"
+                             "cti:int:opt;",
                              "clip:vnode;",
                              comp_decode_create, (void *)"Decode", plugin);
     vspapi->registerFunction("Restore",
@@ -783,7 +793,8 @@ VS_EXTERNAL_API(void) VapourSynthPluginInit2(VSPlugin *plugin, const VSPLUGINAPI
                              "transform:int:opt;"
                              "level:int:opt;"
                              "lut:float[]:opt;"
-                             "evidence:float:opt;",
+                             "evidence:float:opt;"
+                             "cti:int:opt;",
                              "clip:vnode;",
                              comp_restore_create, (void *)"Restore", plugin);
 }

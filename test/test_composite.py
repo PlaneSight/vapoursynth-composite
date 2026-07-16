@@ -5,6 +5,7 @@
 
 import sys
 
+import numpy as np
 import vapoursynth as vs
 
 core = vs.core
@@ -385,6 +386,26 @@ for bad_kw, needle in ((dict(evidence=-1.0), '>= 0'),
         assert needle in str(e), (needle, str(e))
     else:
         assert False, f'expected error: {needle}'
+
+# ---- cti: sharpens coincident color edges, inert elsewhere
+tex2 = core.std.StackHorizontal([flat([20000, 40960, 28672], w=360),
+                                 flat([45000, 24576, 36864], w=360)])
+enc2 = core.composite.Encode(tex2)
+u_plain = np.asarray(core.composite.Decode(enc2, dimensions=2).get_frame(0)[1]).astype(np.int32)
+u_cti = np.asarray(core.composite.Decode(enc2, dimensions=2, cti=1).get_frame(0)[1]).astype(np.int32)
+want = np.where(np.arange(720) < 360, 40960, 24576)
+band = slice(352, 368)
+e_plain = np.abs(u_plain[100:476, band] - want[band]).mean()
+e_cti = np.abs(u_cti[100:476, band] - want[band]).mean()
+assert e_cti < e_plain * 0.7, (e_plain, e_cti)
+# flat interior untouched
+assert np.abs(u_cti[100:476, 40:300] - 40960).max() <= 96
+try:
+    core.composite.Decode(enc2, dimensions=1, cti=1)
+except vs.Error as e:
+    assert 'dimensions 2 or 3' in str(e)
+else:
+    assert False, 'cti accepted with dimensions=1'
 
 # ---- leak-aware eq: works on PAL transforms, differs from eq=1
 eq2 = core.composite.Decode(enc_t, dimensions=2, eq=2)
