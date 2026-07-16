@@ -250,9 +250,21 @@ int comp_decode_init(comp_decode_t *d, int standard, double threshold,
         }
     }
 
+    if (dimensions == 3 && (standard == COMP_STD_PAL || use_transform)) {
+        /* slab cache sized so concurrent in-flight frames (each drawing
+         * on two slabs, consecutive frames sharing them) do not evict
+         * each other */
+        if (comp_t3d_cache_init(&d->t3cache, nscratch / 2 + 3,
+                                d->width, d->height / 2, eq == 2)) {
+            comp_transform3d_free(&d->transform3);
+            return -1;
+        }
+    }
+
     d->scratch = calloc(nscratch, sizeof(*d->scratch));
     if (!d->scratch) {
         comp_transform2d_free(&d->transform);
+        comp_t3d_cache_free(&d->t3cache);
         return -1;
     }
     d->nscratch = nscratch;
@@ -318,10 +330,12 @@ void comp_decode_free(comp_decode_t *d)
         pthread_cond_destroy(&d->cond);
     }
     if (d->standard == COMP_STD_PAL || d->use_transform) {
-        if (d->dimensions == 2)
+        if (d->dimensions == 2) {
             comp_transform2d_free(&d->transform);
-        else if (d->dimensions == 3)
+        } else if (d->dimensions == 3) {
             comp_transform3d_free(&d->transform3);
+            comp_t3d_cache_free(&d->t3cache);
+        }
     }
 }
 
@@ -1058,7 +1072,8 @@ void comp_decode_frame(comp_decode_t *d, int frame, int nframes,
                 fields[i].data = views[k].data + (g & 1) * views[k].stride;
                 fields[i].stride = 2 * views[k].stride;
             }
-            comp_transform3d_frame(&d->transform3, fields, z0, nfields,
+            comp_transform3d_frame(&d->transform3, &d->t3cache,
+                                   fields, z0, nfields,
                                    frame, 0, w, frows,
                                    s->chroma_f, s->chroma_f + w, 2 * w,
                                    s->conf, s->conf ? s->conf + w : NULL);
@@ -1098,7 +1113,8 @@ void comp_decode_frame(comp_decode_t *d, int frame, int nframes,
                 fields[i].data = views[k].data + ((g ^ parity) & 1) * views[k].stride;
                 fields[i].stride = 2 * views[k].stride;
             }
-            comp_transform3d_frame(&d->transform3, fields, z0, nfields,
+            comp_transform3d_frame(&d->transform3, &d->t3cache,
+                                   fields, z0, nfields,
                                    frame, parity, w, rows / 2,
                                    s->chroma_f, s->chroma_f + w, 2 * w,
                                    s->conf, s->conf ? s->conf + w : NULL);

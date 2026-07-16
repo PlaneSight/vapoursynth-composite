@@ -56,6 +56,7 @@ struct comp_decode_t {
     int32_t cfilt_q16[COMP_DECODE_FILTER_SIZE + 1][4];
     comp_transform2d_t transform;
     comp_transform3d_t transform3;
+    comp_t3d_cache_t t3cache;    /* 3D transform slab cache */
     comp_encode_t enc;   /* for refine resynthesis */
 
     /* scratch pool, allocated once at init and reused per frame */

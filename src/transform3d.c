@@ -14,8 +14,10 @@
  * either way. The commented offset pairs sidebands with empty bins.
  */
 
+#include <limits.h>
 #include <math.h>
 #include <pthread.h>
+#include <stdlib.h>
 #include <string.h>
 
 #include "osdep.h"
@@ -385,94 +387,265 @@ static float apply_filter_ntsc(const comp_transform3d_t *t,
     return conf_den > 0.0f ? conf_num / conf_den : 0.0f;
 }
 
-void comp_transform3d_frame(const comp_transform3d_t *t,
-                            const comp_field_view_t *fields, int z0, int nfields,
-                            int frame, int parity, int width, int field_rows,
-                            float *chroma0, float *chroma1, ptrdiff_t chroma_stride,
-                            float *conf0, float *conf1)
+/* the slab origin never takes this value: the grid is anchored at
+ * absolute field 0 and the first frame's low slab sits at -ZTILE/2 */
+#define SLAB_EMPTY INT_MIN
+
+int comp_t3d_cache_init(comp_t3d_cache_t *c, int nslabs, int width,
+                        int field_rows, int with_conf)
+{
+    if (nslabs < 2 || width < 1 || field_rows < 1)
+        return -1;
+    memset(c, 0, sizeof(*c));
+    pthread_mutex_init(&c->lock, NULL);
+    pthread_cond_init(&c->cond, NULL);
+    c->slabs = calloc(nslabs, sizeof(*c->slabs));
+    if (!c->slabs) {
+        pthread_mutex_destroy(&c->lock);
+        pthread_cond_destroy(&c->cond);
+        return -1;
+    }
+    c->nslabs = nslabs;
+    c->width = width;
+    c->field_rows = field_rows;
+
+    const size_t planes = sizeof(float) * ZTILE * field_rows * width;
+    for (int i = 0; i < nslabs; i++) {
+        c->slabs[i].tz = SLAB_EMPTY;
+        c->slabs[i].chroma = malloc(planes);
+        if (with_conf)
+            c->slabs[i].conf = malloc(planes);
+        if (!c->slabs[i].chroma || (with_conf && !c->slabs[i].conf)) {
+            comp_t3d_cache_free(c);
+            return -1;
+        }
+    }
+    return 0;
+}
+
+void comp_t3d_cache_free(comp_t3d_cache_t *c)
+{
+    if (!c->slabs)
+        return;
+    for (int i = 0; i < c->nslabs; i++) {
+        free(c->slabs[i].chroma);
+        free(c->slabs[i].conf);
+    }
+    free(c->slabs);
+    c->slabs = NULL;
+    pthread_mutex_destroy(&c->lock);
+    pthread_cond_destroy(&c->cond);
+}
+
+static comp_t3d_slab_t *cache_lookup(comp_t3d_cache_t *c, int tz, int parity)
+{
+    for (int i = 0; i < c->nslabs; i++)
+        if (c->slabs[i].tz == tz && c->slabs[i].parity == parity)
+            return &c->slabs[i];
+    return NULL;
+}
+
+static comp_t3d_slab_t *cache_victim(comp_t3d_cache_t *c,
+                                     const comp_t3d_slab_t *ex1,
+                                     const comp_t3d_slab_t *ex2)
+{
+    comp_t3d_slab_t *v = NULL;
+    for (int i = 0; i < c->nslabs; i++) {
+        comp_t3d_slab_t *s = &c->slabs[i];
+        if (s == ex1 || s == ex2 || s->refs > 0)
+            continue;
+        if (s->tz == SLAB_EMPTY)
+            return s;
+        if (!v || s->stamp < v->stamp)
+            v = s;
+    }
+    return v;
+}
+
+/* Take references on the slabs for tz1 and tz2, claiming missing ones
+ * for the caller to build (*build set, ready cleared). Both slots are
+ * secured under one lock acquisition and a thread that cannot get both
+ * holds nothing while it waits, so waiters cannot deadlock: builders
+ * never block, and every wait is for a builder to finish or a
+ * reference to drop. */
+static void cache_acquire(comp_t3d_cache_t *c, int parity, int tz1, int tz2,
+                          comp_t3d_slab_t **s1, comp_t3d_slab_t **s2,
+                          int *build1, int *build2)
+{
+    pthread_mutex_lock(&c->lock);
+    for (;;) {
+        comp_t3d_slab_t *a = cache_lookup(c, tz1, parity);
+        comp_t3d_slab_t *b = cache_lookup(c, tz2, parity);
+        comp_t3d_slab_t *va = a ? NULL : cache_victim(c, b, NULL);
+        comp_t3d_slab_t *vb = b ? NULL : cache_victim(c, a, va);
+
+        if ((a || va) && (b || vb)) {
+            if (!a) {
+                a = va;
+                a->tz = tz1;
+                a->parity = parity;
+                a->ready = 0;
+                *build1 = 1;
+            }
+            if (!b) {
+                b = vb;
+                b->tz = tz2;
+                b->parity = parity;
+                b->ready = 0;
+                *build2 = 1;
+            }
+            a->refs++;
+            b->refs++;
+            a->stamp = ++c->counter;
+            b->stamp = ++c->counter;
+            *s1 = a;
+            *s2 = b;
+            pthread_mutex_unlock(&c->lock);
+            return;
+        }
+        pthread_cond_wait(&c->cond, &c->lock);
+    }
+}
+
+/* Overlap-add every tile at temporal grid position slab->tz into the
+ * slab's ZTILE contribution planes. width/field_rows give the frame
+ * geometry (at most the cache's capacity) and define the plane layout,
+ * which the assembly in comp_transform3d_frame mirrors. */
+static void build_slab(const comp_transform3d_t *t, comp_t3d_slab_t *s,
+                       const comp_field_view_t *fields, int z0, int nfields,
+                       int width, int field_rows)
 {
     ALIGNED_32( float real[TILE_REAL] );
     ALIGNED_32( fftwf_complex cplx_in[TILE_CPLX] );
     ALIGNED_32( fftwf_complex cplx_out[TILE_CPLX] );
-    float *chroma[2] = { chroma0, chroma1 };
-    float *conf[2] = { conf0, conf1 };
-    const int fout = frame * 2;
     const int frame_lines = field_rows * 2;
+    const int tz = s->tz;
+    const int parity = s->parity;
+    const size_t plane = (size_t)field_rows * width;
 
-    for (int f = 0; f < 2; f++)
-        for (int r = 0; r < field_rows; r++) {
-            memset(chroma[f] + r * chroma_stride, 0, sizeof(float) * width);
-            if (conf[f])
-                memset(conf[f] + r * chroma_stride, 0, sizeof(float) * width);
-        }
+    memset(s->chroma, 0, sizeof(float) * ZTILE * plane);
+    if (s->conf)
+        memset(s->conf, 0, sizeof(float) * ZTILE * plane);
 
-    /* the two half-overlapped z positions whose tiles cover this frame's
-     * fields; the grid is anchored at absolute field 0 */
-    const int tz_hi = ((fout + 1) / (ZTILE / 2)) * (ZTILE / 2);
+    for (int tile_y = -YTILE / 2; tile_y < frame_lines; tile_y += YTILE / 2) {
+        const int start_y = tile_y < 0 ? -tile_y : 0;
+        const int end_y = frame_lines - tile_y < YTILE ? frame_lines - tile_y : YTILE;
 
-    for (int tz = tz_hi - ZTILE / 2; tz <= tz_hi; tz += ZTILE / 2) {
-        for (int tile_y = -YTILE / 2; tile_y < frame_lines; tile_y += YTILE / 2) {
-            const int start_y = tile_y < 0 ? -tile_y : 0;
-            const int end_y = frame_lines - tile_y < YTILE ? frame_lines - tile_y : YTILE;
+        for (int tile_x = -XTILE / 2; tile_x < width; tile_x += XTILE / 2) {
+            const int start_x = tile_x < 0 ? -tile_x : 0;
+            const int end_x = width - tile_x < XTILE ? width - tile_x : XTILE;
 
-            for (int tile_x = -XTILE / 2; tile_x < width; tile_x += XTILE / 2) {
-                const int start_x = tile_x < 0 ? -tile_x : 0;
-                const int end_x = width - tile_x < XTILE ? width - tile_x : XTILE;
-
-                /* windowed forward FFT: a row is real data only when it
-                 * is inside the picture and belongs to field tz+z */
-                for (int z = 0; z < ZTILE; z++) {
-                    const int g = tz + z;
-                    const comp_field_view_t *fv =
-                        (g >= z0 && g < z0 + nfields) ? &fields[g - z0] : NULL;
-                    if (fv && !fv->data)
-                        fv = NULL;
-                    for (int y = 0; y < YTILE; y++) {
-                        const int fl = tile_y + y;
-                        const int usable = fv && y >= start_y && y < end_y
-                                           && ((fl + parity) & 1) == (g & 1);
-                        const uint16_t *b = usable
-                            ? fv->data + (fl >> 1) * fv->stride : NULL;
-                        float *dst = &real[(z * YTILE + y) * XTILE];
-                        for (int x = 0; x < XTILE; x++) {
-                            const float v = (!usable || x < start_x || x >= end_x)
-                                            ? LEVEL_BLACK : (float)b[tile_x + x];
-                            dst[x] = v * t->window[z][y][x];
-                        }
+            /* windowed forward FFT: a row is real data only when it
+             * is inside the picture and belongs to field tz+z */
+            for (int z = 0; z < ZTILE; z++) {
+                const int g = tz + z;
+                const comp_field_view_t *fv =
+                    (g >= z0 && g < z0 + nfields) ? &fields[g - z0] : NULL;
+                if (fv && !fv->data)
+                    fv = NULL;
+                for (int y = 0; y < YTILE; y++) {
+                    const int fl = tile_y + y;
+                    const int usable = fv && y >= start_y && y < end_y
+                                       && ((fl + parity) & 1) == (g & 1);
+                    const uint16_t *b = usable
+                        ? fv->data + (fl >> 1) * fv->stride : NULL;
+                    float *dst = &real[(z * YTILE + y) * XTILE];
+                    for (int x = 0; x < XTILE; x++) {
+                        const float v = (!usable || x < start_x || x >= end_x)
+                                        ? LEVEL_BLACK : (float)b[tile_x + x];
+                        dst[x] = v * t->window[z][y][x];
                     }
                 }
-                fftwf_execute_dft_r2c(t->forward, real, cplx_in);
+            }
+            fftwf_execute_dft_r2c(t->forward, real, cplx_in);
 
-                const float w = t->standard == COMP_STD_PAL
-                    ? apply_filter(t, cplx_in, cplx_out)
-                    : apply_filter_ntsc(t, cplx_in, cplx_out);
+            const float w = t->standard == COMP_STD_PAL
+                ? apply_filter(t, cplx_in, cplx_out)
+                : apply_filter_ntsc(t, cplx_in, cplx_out);
 
-                fftwf_execute_dft_c2r(t->inverse, cplx_out, real);
+            fftwf_execute_dft_c2r(t->inverse, cplx_out, real);
 
-                /* overlap-add only the parts landing on our two fields;
-                 * the confidence uses the same unity-sum window weights */
-                for (int z = 0; z < ZTILE; z++) {
-                    const int g = tz + z;
-                    if (g != fout && g != fout + 1)
+            /* the confidence uses the same unity-sum window weights */
+            for (int z = 0; z < ZTILE; z++) {
+                const int g = tz + z;
+                float *cb = s->chroma + z * plane;
+                float *wb = s->conf ? s->conf + z * plane : NULL;
+                for (int y = start_y; y < end_y; y++) {
+                    const int fl = tile_y + y;
+                    if (((fl + parity) & 1) != (g & 1))
                         continue;
-                    float *cb = chroma[(g - fout) ^ parity];
-                    float *wb = conf[(g - fout) ^ parity];
-                    for (int y = start_y; y < end_y; y++) {
-                        const int fl = tile_y + y;
-                        if (((fl + parity) & 1) != (g & 1))
-                            continue;
-                        float *b = cb + (fl >> 1) * chroma_stride;
+                    float *b = cb + (fl >> 1) * width;
+                    for (int x = start_x; x < end_x; x++)
+                        b[tile_x + x] += real[(z * YTILE + y) * XTILE + x]
+                                         / (ZTILE * YTILE * XTILE);
+                    if (wb) {
+                        float *bw = wb + (fl >> 1) * width;
                         for (int x = start_x; x < end_x; x++)
-                            b[tile_x + x] += real[(z * YTILE + y) * XTILE + x]
-                                             / (ZTILE * YTILE * XTILE);
-                        if (wb) {
-                            float *bw = wb + (fl >> 1) * chroma_stride;
-                            for (int x = start_x; x < end_x; x++)
-                                bw[tile_x + x] += w * t->window[z][y][x];
-                        }
+                            bw[tile_x + x] += w * t->window[z][y][x];
                     }
                 }
             }
         }
     }
+}
+
+void comp_transform3d_frame(const comp_transform3d_t *t, comp_t3d_cache_t *c,
+                            const comp_field_view_t *fields, int z0, int nfields,
+                            int frame, int parity, int width, int field_rows,
+                            float *chroma0, float *chroma1, ptrdiff_t chroma_stride,
+                            float *conf0, float *conf1)
+{
+    float *chroma[2] = { chroma0, chroma1 };
+    float *conf[2] = { conf0, conf1 };
+    const int fout = frame * 2;
+
+    /* the two half-overlapped z positions whose tiles cover this frame's
+     * fields; the grid is anchored at absolute field 0 */
+    const int tz_hi = ((fout + 1) / (ZTILE / 2)) * (ZTILE / 2);
+    comp_t3d_slab_t *s1, *s2;
+    int build1 = 0, build2 = 0;
+
+    cache_acquire(c, parity, tz_hi - ZTILE / 2, tz_hi, &s1, &s2,
+                  &build1, &build2);
+    if (build1)
+        build_slab(t, s1, fields, z0, nfields, width, field_rows);
+    if (build2)
+        build_slab(t, s2, fields, z0, nfields, width, field_rows);
+
+    pthread_mutex_lock(&c->lock);
+    if (build1)
+        s1->ready = 1;
+    if (build2)
+        s2->ready = 1;
+    if (build1 || build2)
+        pthread_cond_broadcast(&c->cond);
+    while (!s1->ready || !s2->ready)
+        pthread_cond_wait(&c->cond, &c->lock);
+    pthread_mutex_unlock(&c->lock);
+
+    /* each output field is the sum of the two covering slabs' planes */
+    const size_t plane = (size_t)field_rows * width;
+    for (int f = 0; f < 2; f++) {
+        const int g = fout + f;
+        const float *p1 = s1->chroma + (g - s1->tz) * plane;
+        const float *p2 = s2->chroma + (g - s2->tz) * plane;
+        float *dc = chroma[f ^ parity];
+        float *dw = conf[f ^ parity];
+        for (int r = 0; r < field_rows; r++)
+            for (int x = 0; x < width; x++)
+                dc[r * chroma_stride + x] = p1[r * width + x] + p2[r * width + x];
+        if (dw) {
+            const float *q1 = s1->conf + (g - s1->tz) * plane;
+            const float *q2 = s2->conf + (g - s2->tz) * plane;
+            for (int r = 0; r < field_rows; r++)
+                for (int x = 0; x < width; x++)
+                    dw[r * chroma_stride + x] = q1[r * width + x] + q2[r * width + x];
+        }
+    }
+
+    pthread_mutex_lock(&c->lock);
+    s1->refs--;
+    s2->refs--;
+    pthread_cond_broadcast(&c->cond);
+    pthread_mutex_unlock(&c->lock);
 }
