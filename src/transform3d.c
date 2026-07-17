@@ -1,17 +1,25 @@
 /*
- * 3D Transform PAL chroma separation.
+ * 3D Transform chroma separation.
  *
- * Port of ld-chroma-decoder's TransformPal3D: the 2D tile filter gains
- * a temporal axis. Tiles are 16 samples by 32 frame lines by 8 fields,
- * half-overlapped in every axis; rows belonging to the other field are
- * filled with black, so the FFT sees the interlaced lattice directly.
- * Bins are kept only if symmetric with their reflection about the
- * chroma carrier at (fsc, 72 c/aph, 18.75 Hz). The reference doubts
- * its own temporal reflection offset (ZTILE/4, with a comment saying
- * 3*ZTILE/4), but ZTILE/4 is correct: the black-filled lattice holds
- * the carrier at two alias pairs, and this reflection maps every
- * sideband to its mirror or the mirror's alias, equal in magnitude
- * either way. The commented offset pairs sidebands with empty bins.
+ * After ld-chroma-decoder's TransformPal3D: the 2D tile filter gains a
+ * temporal axis, with tiles half-overlapped in every axis and bins
+ * kept only if symmetric with their reflection about the chroma
+ * carrier.
+ *
+ * PAL separates on the displaced field-line lattice of GB 2365247 A
+ * (Figure 6): each field is displaced vertically by one picture line
+ * per field interval (reset per tile, inverted after), which lands all
+ * eight fields on one dense grid, so the tiles are 16 samples by 16
+ * field lines by 8 fields — half the FFT volume of the reference's
+ * black-filled frame-line tiles. On this raster's line-locked grid the
+ * carriers are then single exact bins, U at (z,y,x) = (4,12,4) and V
+ * at (4,4,4), sharing one reflection map (probe-verified; the patent's
+ * own +-12.5 Hz figures correspond to the opposite displacement
+ * direction, which splits the carriers here).
+ *
+ * NTSC keeps the reference's frame-line tiles (16x32x8) with the other
+ * field's rows black, so the FFT sees the interlaced lattice directly;
+ * its carrier lattice under displacement has not been derived.
  */
 
 #include <limits.h>
@@ -30,10 +38,16 @@
 
 #define XTILE COMP_T3D_XTILE
 #define YTILE COMP_T3D_YTILE
+#define YTILE_PAL COMP_T3D_YTILE_PAL
 #define ZTILE COMP_T3D_ZTILE
 #define XC COMP_T3D_XCOMPLEX
 #define TILE_REAL (ZTILE * YTILE * XTILE)
 #define TILE_CPLX (ZTILE * YTILE * XC)
+#define TILE_REAL_PAL (ZTILE * YTILE_PAL * XTILE)
+#define TILE_CPLX_PAL (ZTILE * YTILE_PAL * XC)
+
+/* largest per-field displacement, in field rows: ceil((ZTILE-1)/2) */
+#define SHIFT_MAX (ZTILE / 2)
 
 #define LEVEL_BLACK 16384.0f
 
@@ -54,22 +68,23 @@ int comp_transform3d_init(comp_transform3d_t *t, double threshold, int standard,
     t->level = !!level;
     t->use_lut = 0;
     t->evidence = (float)evidence;
+    const int ytile = standard == COMP_STD_PAL ? YTILE_PAL : YTILE;
     for (int i = 0; i < COMP_T3D_NTHRESH; i++)
         t->threshold_sq[i] = (float)(threshold * threshold);
 
     for (int z = 0; z < ZTILE; z++)
-        for (int y = 0; y < YTILE; y++)
+        for (int y = 0; y < ytile; y++)
             for (int x = 0; x < XTILE; x++)
                 t->window[z][y][x] = (float)(compute_window(z, ZTILE)
-                                             * compute_window(y, YTILE)
+                                             * compute_window(y, ytile)
                                              * compute_window(x, XTILE));
 
     ALIGNED_32( float real[TILE_REAL] );
     ALIGNED_32( fftwf_complex cplx[TILE_CPLX] );
     pthread_mutex_lock(&planner_lock);
-    t->forward = fftwf_plan_dft_r2c_3d(ZTILE, YTILE, XTILE, real, cplx,
+    t->forward = fftwf_plan_dft_r2c_3d(ZTILE, ytile, XTILE, real, cplx,
                                        FFTW_MEASURE);
-    t->inverse = fftwf_plan_dft_c2r_3d(ZTILE, YTILE, XTILE, cplx, real,
+    t->inverse = fftwf_plan_dft_c2r_3d(ZTILE, ytile, XTILE, cplx, real,
                                        FFTW_MEASURE);
     pthread_mutex_unlock(&planner_lock);
     if (!t->forward || !t->inverse) {
@@ -81,7 +96,9 @@ int comp_transform3d_init(comp_transform3d_t *t, double threshold, int standard,
 
 void comp_transform3d_set_lut(comp_transform3d_t *t, const double *v)
 {
-    for (int b = 0; b < COMP_T3D_NTHRESH; b++)
+    const int nbins = t->standard == COMP_STD_PAL ? COMP_T3D_NTHRESH_PAL
+                                                  : COMP_T3D_NTHRESH;
+    for (int b = 0; b < nbins; b++)
         for (int k = 0; k < COMP_LUT_K; k++)
             t->lut[b][k] = (float)v[b * COMP_LUT_K + k];
     t->use_lut = 1;
@@ -111,24 +128,31 @@ static inline float lut_gain(const float *row, float lo, float hi)
     return row[k] + (row[k + 1] - row[k]) * (pos - k);
 }
 
-/* Returns the tile's chroma confidence: the kept output energy's mean
- * pair-symmetry ratio, 0 when nothing was kept. */
-static float apply_filter(const comp_transform3d_t *t,
-                          const fftwf_complex *in, fftwf_complex *out)
+
+/* PAL frequency-domain filter on the displaced field-line lattice: the
+ * carriers are single exact bins, U at (z,y,x) = (4,12,4) and V at
+ * (4,4,4), and both share the reflection map
+ * ((-z) mod 8, (8-y) mod 16, 8-x), whose four self-paired bins are the
+ * two carriers plus the two 25 Hz-offset partners (kept, matching the
+ * reference's treatment of its self-paired bins). Returns the tile's
+ * chroma confidence: the kept output energy's mean pair-symmetry
+ * ratio, 0 when nothing was kept. */
+static float apply_filter_pal(const comp_transform3d_t *t,
+                              const fftwf_complex *in, fftwf_complex *out)
 {
     const float *tsq = t->threshold_sq;
     float conf_num = 0.0f, conf_den = 0.0f;
 
-    memset(out, 0, sizeof(fftwf_complex) * TILE_CPLX);
+    memset(out, 0, sizeof(fftwf_complex) * TILE_CPLX_PAL);
 
     for (int z = 0; z < ZTILE; z++) {
-        const int z_ref = ((ZTILE / 4) + ZTILE - z) % ZTILE;
-        for (int y = 0; y < YTILE; y++) {
-            const int y_ref = ((YTILE / 4) + YTILE - y) % YTILE;
-            const fftwf_complex *bi = in + (z * YTILE + y) * XC;
-            const fftwf_complex *bi_ref = in + (z_ref * YTILE + y_ref) * XC;
-            fftwf_complex *bo = out + (z * YTILE + y) * XC;
-            fftwf_complex *bo_ref = out + (z_ref * YTILE + y_ref) * XC;
+        const int z_ref = (ZTILE - z) % ZTILE;
+        for (int y = 0; y < YTILE_PAL; y++) {
+            const int y_ref = ((YTILE_PAL / 2) + YTILE_PAL - y) % YTILE_PAL;
+            const fftwf_complex *bi = in + (z * YTILE_PAL + y) * XC;
+            const fftwf_complex *bi_ref = in + (z_ref * YTILE_PAL + y_ref) * XC;
+            fftwf_complex *bo = out + (z * YTILE_PAL + y) * XC;
+            fftwf_complex *bo_ref = out + (z_ref * YTILE_PAL + y_ref) * XC;
 
             for (int x = XTILE / 8; x <= XTILE / 4; x++) {
                 const int x_ref = (XTILE / 2) - x;
@@ -150,21 +174,15 @@ static float apply_filter(const comp_transform3d_t *t,
                 const float r = hi > 0.0f ? lo / hi : 1.0f;
 
                 /* LF-luma evidence at the pair's baseband difference
-                 * frequency k - c. In this black-filled interlace
-                 * lattice the U and V carriers each appear twice —
-                 * (z,y) = (7,12)/(3,28) and (5,4)/(1,20), measured on
-                 * an encoded flat field — and luma replicates onto the
-                 * same alias offset, so take the strongest of the four
-                 * difference positions. */
+                 * frequency k - c, for the two single carriers */
                 float g_e = 1.0f;
                 if (t->evidence > 0.0f) {
-                    static const int cz[4] = { 7, 3, 5, 1 };
-                    static const int cy[4] = { 12, 28, 4, 20 };
+                    static const int cy[2] = { 12, 4 };
                     float e = 0.0f;
-                    for (int c = 0; c < 4; c++) {
+                    for (int c = 0; c < 2; c++) {
                         const fftwf_complex *lf =
-                            in + (((cz[c] - z + ZTILE) % ZTILE) * YTILE
-                                  + (cy[c] - y + YTILE) % YTILE) * XC
+                            in + (((4 - z + ZTILE) % ZTILE) * YTILE_PAL
+                                  + (cy[c] - y + YTILE_PAL) % YTILE_PAL) * XC
                                + (XTILE / 4) - x;
                         const float ec = (*lf)[0] * (*lf)[0] + (*lf)[1] * (*lf)[1];
                         e = ec > e ? ec : e;
@@ -188,8 +206,6 @@ static float apply_filter(const comp_transform3d_t *t,
                 }
 
                 if (t->level) {
-                    /* set the larger of the pair to the smaller, phase
-                     * preserved (GB 2365247 A) */
                     float f_in = g_e, f_ref = g_e;
                     if (m_in_sq > m_ref_sq)
                         f_in *= sqrtf(m_ref_sq / m_in_sq);
@@ -220,7 +236,6 @@ static float apply_filter(const comp_transform3d_t *t,
 
     return conf_den > 0.0f ? conf_num / conf_den : 0.0f;
 }
-
 
 static inline float dist_sq3(float a, float b, float c)
 {
@@ -511,9 +526,9 @@ static void cache_acquire(comp_t3d_cache_t *c, int parity, int tz1, int tz2,
  * slab's ZTILE contribution planes. width/field_rows give the frame
  * geometry (at most the cache's capacity) and define the plane layout,
  * which the assembly in comp_transform3d_frame mirrors. */
-static void build_slab(const comp_transform3d_t *t, comp_t3d_slab_t *s,
-                       const comp_field_view_t *fields, int z0, int nfields,
-                       int width, int field_rows)
+static void build_slab_ntsc(const comp_transform3d_t *t, comp_t3d_slab_t *s,
+                            const comp_field_view_t *fields, int z0, int nfields,
+                            int width, int field_rows)
 {
     ALIGNED_32( float real[TILE_REAL] );
     ALIGNED_32( fftwf_complex cplx_in[TILE_CPLX] );
@@ -559,9 +574,7 @@ static void build_slab(const comp_transform3d_t *t, comp_t3d_slab_t *s,
             }
             fftwf_execute_dft_r2c(t->forward, real, cplx_in);
 
-            const float w = t->standard == COMP_STD_PAL
-                ? apply_filter(t, cplx_in, cplx_out)
-                : apply_filter_ntsc(t, cplx_in, cplx_out);
+            const float w = apply_filter_ntsc(t, cplx_in, cplx_out);
 
             fftwf_execute_dft_c2r(t->inverse, cplx_out, real);
 
@@ -580,6 +593,79 @@ static void build_slab(const comp_transform3d_t *t, comp_t3d_slab_t *s,
                                          / (ZTILE * YTILE * XTILE);
                     if (wb) {
                         float *bw = wb + (fl >> 1) * width;
+                        for (int x = start_x; x < end_x; x++)
+                            bw[tile_x + x] += w * t->window[z][y][x];
+                    }
+                }
+            }
+        }
+    }
+}
+
+/* PAL slab builder on the displaced lattice: field z is displaced down
+ * by z picture lines, i.e. ceil(z/2) field rows, making the stack a
+ * dense 16-row field-line lattice; the inverse displacement is folded
+ * into the overlap-add row mapping. Rows have no parity test — every
+ * tile row belongs to its field. */
+static void build_slab_pal(const comp_transform3d_t *t, comp_t3d_slab_t *s,
+                           const comp_field_view_t *fields, int z0, int nfields,
+                           int width, int field_rows)
+{
+    ALIGNED_32( float real[TILE_REAL_PAL] );
+    ALIGNED_32( fftwf_complex cplx_in[TILE_CPLX_PAL] );
+    ALIGNED_32( fftwf_complex cplx_out[TILE_CPLX_PAL] );
+    const int tz = s->tz;
+    const size_t plane = (size_t)field_rows * width;
+
+    memset(s->chroma, 0, sizeof(float) * ZTILE * plane);
+    if (s->conf)
+        memset(s->conf, 0, sizeof(float) * ZTILE * plane);
+
+    for (int tile_r = -YTILE_PAL / 2; tile_r < field_rows + SHIFT_MAX;
+         tile_r += YTILE_PAL / 2) {
+        for (int tile_x = -XTILE / 2; tile_x < width; tile_x += XTILE / 2) {
+            const int start_x = tile_x < 0 ? -tile_x : 0;
+            const int end_x = width - tile_x < XTILE ? width - tile_x : XTILE;
+
+            for (int z = 0; z < ZTILE; z++) {
+                const int g = tz + z;
+                const int sz = (z + 1) / 2;
+                const comp_field_view_t *fv =
+                    (g >= z0 && g < z0 + nfields) ? &fields[g - z0] : NULL;
+                if (fv && !fv->data)
+                    fv = NULL;
+                for (int y = 0; y < YTILE_PAL; y++) {
+                    const int r = tile_r + y - sz;
+                    const int usable = fv && r >= 0 && r < field_rows;
+                    const uint16_t *b = usable ? fv->data + r * fv->stride : NULL;
+                    float *dst = &real[(z * YTILE_PAL + y) * XTILE];
+                    for (int x = 0; x < XTILE; x++) {
+                        const float v = (!usable || x < start_x || x >= end_x)
+                                        ? LEVEL_BLACK : (float)b[tile_x + x];
+                        dst[x] = v * t->window[z][y][x];
+                    }
+                }
+            }
+            fftwf_execute_dft_r2c(t->forward, real, cplx_in);
+
+            const float w = apply_filter_pal(t, cplx_in, cplx_out);
+
+            fftwf_execute_dft_c2r(t->inverse, cplx_out, real);
+
+            for (int z = 0; z < ZTILE; z++) {
+                const int sz = (z + 1) / 2;
+                float *cb = s->chroma + z * plane;
+                float *wb = s->conf ? s->conf + z * plane : NULL;
+                for (int y = 0; y < YTILE_PAL; y++) {
+                    const int r = tile_r + y - sz;
+                    if (r < 0 || r >= field_rows)
+                        continue;
+                    float *b = cb + (size_t)r * width;
+                    for (int x = start_x; x < end_x; x++)
+                        b[tile_x + x] += real[(z * YTILE_PAL + y) * XTILE + x]
+                                         / (ZTILE * YTILE_PAL * XTILE);
+                    if (wb) {
+                        float *bw = wb + (size_t)r * width;
                         for (int x = start_x; x < end_x; x++)
                             bw[tile_x + x] += w * t->window[z][y][x];
                     }
@@ -608,9 +694,11 @@ void comp_transform3d_frame(const comp_transform3d_t *t, comp_t3d_cache_t *c,
     cache_acquire(c, parity, tz_hi - ZTILE / 2, tz_hi, &s1, &s2,
                   &build1, &build2);
     if (build1)
-        build_slab(t, s1, fields, z0, nfields, width, field_rows);
+        (t->standard == COMP_STD_PAL ? build_slab_pal : build_slab_ntsc)
+            (t, s1, fields, z0, nfields, width, field_rows);
     if (build2)
-        build_slab(t, s2, fields, z0, nfields, width, field_rows);
+        (t->standard == COMP_STD_PAL ? build_slab_pal : build_slab_ntsc)
+            (t, s2, fields, z0, nfields, width, field_rows);
 
     pthread_mutex_lock(&c->lock);
     if (build1)

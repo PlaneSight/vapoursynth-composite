@@ -417,8 +417,12 @@ static void VS_CC comp_decode_create(const VSMap *in, VSMap *out, void *user_dat
             RETERROR("lut and level are mutually exclusive");
         if (dimensions == 2 && nlut != COMP_T2D_NTHRESH * COMP_LUT_K)
             RETERROR("dimensions=2 needs 1280 lut values (80 bins x 16 knots)");
-        if (dimensions == 3 && nlut != COMP_T3D_NTHRESH * COMP_LUT_K)
-            RETERROR("dimensions=3 needs 12288 lut values (768 bins x 16 knots)");
+        if (dimensions == 3
+            && nlut != (d.standard == COMP_STD_PAL ? COMP_T3D_NTHRESH_PAL
+                                                   : COMP_T3D_NTHRESH) * COMP_LUT_K)
+            RETERROR(d.standard == COMP_STD_PAL
+                     ? "pal dimensions=3 needs 6144 lut values (384 bins x 16 knots)"
+                     : "ntsc dimensions=3 needs 12288 lut values (768 bins x 16 knots)");
         if (dimensions == 1)
             RETERROR("lut needs dimensions 2 or 3");
         if (vsapi->mapNumElements(in, "thresholds") > 0)
@@ -466,8 +470,12 @@ static void VS_CC comp_decode_create(const VSMap *in, VSMap *out, void *user_dat
             RETERROR("thresholds needs the threshold mode (level=0)");
         if (dimensions == 2 && nthresh != COMP_T2D_NTHRESH)
             RETERROR("dimensions=2 needs 80 thresholds");
-        if (dimensions == 3 && nthresh != COMP_T3D_NTHRESH)
-            RETERROR("dimensions=3 needs 768 thresholds");
+        if (dimensions == 3
+            && nthresh != (d.standard == COMP_STD_PAL ? COMP_T3D_NTHRESH_PAL
+                                                      : COMP_T3D_NTHRESH))
+            RETERROR(d.standard == COMP_STD_PAL
+                     ? "pal dimensions=3 needs 384 thresholds"
+                     : "ntsc dimensions=3 needs 768 thresholds");
         if (dimensions == 1)
             RETERROR("thresholds needs dimensions 2 or 3");
         const double *tv = vsapi->mapGetFloatArray(in, "thresholds", &err);
@@ -489,7 +497,7 @@ static void VS_CC comp_decode_create(const VSMap *in, VSMap *out, void *user_dat
                                 dimensions == 2 ? comp_lut_builtin_pal_2d
                                                 : comp_lut_builtin_pal_3d,
                                 (dimensions == 2 ? COMP_T2D_NTHRESH
-                                                 : COMP_T3D_NTHRESH) * COMP_LUT_K);
+                                                 : COMP_T3D_NTHRESH_PAL) * COMP_LUT_K);
         else
             comp_decode_set_lut(d.dec, comp_lut_builtin_ntsc,
                                 COMP_T3D_NTHRESH * COMP_LUT_K);
@@ -650,8 +658,12 @@ static void VS_CC comp_restore_create(const VSMap *in, VSMap *out, void *user_da
             RETERROR("lut and level are mutually exclusive");
         if (dimensions == 2 && nlut != COMP_T2D_NTHRESH * COMP_LUT_K)
             RETERROR("dimensions=2 needs 1280 lut values (80 bins x 16 knots)");
-        if (dimensions == 3 && nlut != COMP_T3D_NTHRESH * COMP_LUT_K)
-            RETERROR("dimensions=3 needs 12288 lut values (768 bins x 16 knots)");
+        if (dimensions == 3
+            && nlut != (d.standard == COMP_STD_PAL ? COMP_T3D_NTHRESH_PAL
+                                                   : COMP_T3D_NTHRESH) * COMP_LUT_K)
+            RETERROR(d.standard == COMP_STD_PAL
+                     ? "pal dimensions=3 needs 6144 lut values (384 bins x 16 knots)"
+                     : "ntsc dimensions=3 needs 12288 lut values (768 bins x 16 knots)");
         if (dimensions == 1)
             RETERROR("lut needs dimensions 2 or 3");
         if (vsapi->mapNumElements(in, "thresholds") > 0)
@@ -750,8 +762,12 @@ static void VS_CC comp_restore_create(const VSMap *in, VSMap *out, void *user_da
             RETERROR("thresholds needs the threshold mode (level=0)");
         if (dimensions == 2 && nthresh != COMP_T2D_NTHRESH)
             RETERROR("dimensions=2 needs 80 thresholds");
-        if (dimensions == 3 && nthresh != COMP_T3D_NTHRESH)
-            RETERROR("dimensions=3 needs 768 thresholds");
+        if (dimensions == 3
+            && nthresh != (d.standard == COMP_STD_PAL ? COMP_T3D_NTHRESH_PAL
+                                                      : COMP_T3D_NTHRESH))
+            RETERROR(d.standard == COMP_STD_PAL
+                     ? "pal dimensions=3 needs 384 thresholds"
+                     : "ntsc dimensions=3 needs 768 thresholds");
         if (dimensions == 1)
             RETERROR("thresholds needs dimensions 2 or 3");
         const double *tv = vsapi->mapGetFloatArray(in, "thresholds", &err);
@@ -773,7 +789,7 @@ static void VS_CC comp_restore_create(const VSMap *in, VSMap *out, void *user_da
                                 dimensions == 2 ? comp_lut_builtin_pal_2d
                                                 : comp_lut_builtin_pal_3d,
                                 (dimensions == 2 ? COMP_T2D_NTHRESH
-                                                 : COMP_T3D_NTHRESH) * COMP_LUT_K);
+                                                 : COMP_T3D_NTHRESH_PAL) * COMP_LUT_K);
         else
             comp_decode_set_lut(d.dec, comp_lut_builtin_ntsc,
                                 COMP_T3D_NTHRESH * COMP_LUT_K);

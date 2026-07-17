@@ -348,7 +348,9 @@ int comp_decode_set_thresholds(comp_decode_t *d, const double *t, int n)
             d->transform.threshold_sq[i] = (float)(t[i] * t[i]);
         return 0;
     }
-    if (d->dimensions == 3 && n == COMP_T3D_NTHRESH) {
+    if (d->dimensions == 3
+        && n == (d->standard == COMP_STD_PAL ? COMP_T3D_NTHRESH_PAL
+                                             : COMP_T3D_NTHRESH)) {
         /* for NTSC these feed the shaped-threshold exponent */
         for (int i = 0; i < n; i++)
             d->transform3.threshold_sq[i] = (float)(t[i] * t[i]);
@@ -366,7 +368,9 @@ int comp_decode_set_lut(comp_decode_t *d, const double *v, int n)
         comp_transform2d_set_lut(&d->transform, v);
         return 0;
     }
-    if (d->dimensions == 3 && n == COMP_T3D_NTHRESH * COMP_LUT_K) {
+    if (d->dimensions == 3
+        && n == (d->standard == COMP_STD_PAL ? COMP_T3D_NTHRESH_PAL
+                                             : COMP_T3D_NTHRESH) * COMP_LUT_K) {
         comp_transform3d_set_lut(&d->transform3, v);
         return 0;
     }

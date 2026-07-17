@@ -10,11 +10,17 @@
 #include "transform2d.h"  /* COMP_LUT_K */
 
 /* Overlapping-tile geometry: XTILE samples by YTILE frame lines by
- * ZTILE fields, advancing by half a tile in each direction. */
-#define COMP_T3D_XTILE    16
-#define COMP_T3D_YTILE    32
-#define COMP_T3D_ZTILE    8
-#define COMP_T3D_XCOMPLEX (COMP_T3D_XTILE / 2 + 1)
+ * ZTILE fields, advancing by half a tile in each direction. NTSC
+ * assembles frame-line tiles with the other field's rows black; PAL
+ * separates on the displaced field-line lattice instead (GB 2365247 A:
+ * one picture line of displacement per field interval makes the fields
+ * a dense lattice), so its tiles are YTILE/2 field lines — half the
+ * FFT volume for the same filter. */
+#define COMP_T3D_XTILE     16
+#define COMP_T3D_YTILE     32
+#define COMP_T3D_YTILE_PAL (COMP_T3D_YTILE / 2)
+#define COMP_T3D_ZTILE     8
+#define COMP_T3D_XCOMPLEX  (COMP_T3D_XTILE / 2 + 1)
 
 /* fields the tiles covering one output frame can span, each side of it */
 #define COMP_T3D_LOOK 3
@@ -22,6 +28,7 @@
 /* bins the symmetry filter considers: z, y outer, x fsc/2..fsc inner */
 #define COMP_T3D_NTHRESH (COMP_T3D_ZTILE * COMP_T3D_YTILE \
                           * (COMP_T3D_XTILE / 4 - COMP_T3D_XTILE / 8 + 1))
+#define COMP_T3D_NTHRESH_PAL (COMP_T3D_NTHRESH / 2)
 
 typedef struct comp_field_view_t comp_field_view_t;
 
@@ -39,13 +46,17 @@ struct comp_transform3d_t {
     int level;
     int use_lut;
     float evidence;
+    /* arrays sized for the larger NTSC geometry; PAL uses the first
+     * YTILE_PAL window rows and NTHRESH_PAL bins */
     float window[COMP_T3D_ZTILE][COMP_T3D_YTILE][COMP_T3D_XTILE];
     float threshold_sq[COMP_T3D_NTHRESH];
     float lut[COMP_T3D_NTHRESH][COMP_LUT_K];
 };
 
-/* PAL chroma is symmetric about (fsc, 72 c/aph, 18.75 Hz); the NTSC
- * variant (after the ld-decode transform-ntsc branch) reflects about
+/* PAL chroma on the displaced lattice is symmetric about the measured
+ * carrier bins, U at (z,y,x) = (4,12,4) and V at (4,4,4) of the
+ * 8x16x16 tile FFT; both share one reflection map. The NTSC variant
+ * (after the ld-decode transform-ntsc branch) reflects about
  * (fsc, 120 c/aph, 15 Hz) with luma-reference evidence and a
  * frequency-shaped threshold, since NTSC's shared U/V carrier makes
  * the symmetry only approximate. level selects amplitude limiting
@@ -56,9 +67,10 @@ int comp_transform3d_init(comp_transform3d_t *t, double threshold, int standard,
                           int level, double evidence);
 void comp_transform3d_free(comp_transform3d_t *t);
 
-/* install a trained per-bin soft-gain LUT (COMP_T3D_NTHRESH * COMP_LUT_K
- * values in [0,1], knots innermost), replacing the pair test (and, for
- * NTSC, the shaped threshold and luma-evidence test) */
+/* install a trained per-bin soft-gain LUT (COMP_T3D_NTHRESH_PAL or
+ * COMP_T3D_NTHRESH bins of COMP_LUT_K values in [0,1], knots
+ * innermost), replacing the pair test (and, for NTSC, the shaped
+ * threshold and luma-evidence test) */
 void comp_transform3d_set_lut(comp_transform3d_t *t, const double *v);
 
 /* Slab cache. A slab holds the accumulated chroma (and confidence)

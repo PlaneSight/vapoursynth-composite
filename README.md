@@ -62,9 +62,12 @@ default.
 - `dimensions` — `3` (default): spatio-temporal separation (3D
   Transform PAL / adaptive 3D comb) drawing on neighboring frames;
   clip-edge frames lean on black temporal padding, and it costs
-  several times 2D's compute. `2`: the fast 2D separation (spatial
-  tiles / line comb). `1`: a deliberately crude notch decoder — a
-  worst-case reference, and `Restore`'s degradation model.
+  several times 2D's compute. PAL separates on GB 2365247 A's
+  displaced field-line lattice (fields sheared into one dense grid:
+  half the FFT volume of frame-line tiles for equal separation).
+  `2`: the fast 2D separation (spatial tiles / line comb). `1`: a
+  deliberately crude notch decoder — a worst-case reference, and
+  `Restore`'s degradation model.
 - `transform` — NTSC with `dimensions=3` only. `1` replaces the 3D
   comb with a Transform NTSC separation (stronger on motion). `2`
   (default there) runs both and routes per sample on a
@@ -75,11 +78,11 @@ default.
   ld-decode reference value); higher demands more symmetry to call a
   bin chroma. Passing it selects threshold mode (`level=0`).
 - `thresholds` — per-bin override of the symmetry test (80 values for
-  `dimensions=2`, 768 for 3). For Transform NTSC the values feed the
-  shaped-threshold exponent instead. Calibrated sets trained on the
-  VQEG corpora ship in `test/`: `thresholds_pal_2d.txt` (beats any
-  uniform threshold), `thresholds_pal_3d.txt` (experimental),
-  `thresholds_ntsc.txt`.
+  `dimensions=2`; 384 for PAL `dimensions=3`, 768 for NTSC). For
+  Transform NTSC the values feed the shaped-threshold exponent
+  instead. Calibrated sets trained on the VQEG corpora ship in
+  `test/`: `thresholds_pal_2d.txt` (beats any uniform threshold),
+  `thresholds_pal_3d.txt` (experimental), `thresholds_ntsc.txt`.
 - `level` — amplitude limiting instead of the trained tables or the
   keep/discard test (GB 2365247 A's preferred embodiment): each bin
   pair's larger magnitude is reduced to the smaller, phase preserved.
@@ -87,7 +90,8 @@ default.
   footage, and safer on synthetic extremes.
 - `lut` — trained soft separation (after US 7,872,689): per frequency
   bin, a gain over the pair-symmetry ratio, 16 knots per bin (1280
-  values for `dimensions=2`, 12288 for 3; transform separations only).
+  values for `dimensions=2`; 6144 for PAL `dimensions=3`, 12288 for
+  NTSC; transform separations only).
   Trained tables are built into the plugin and used by default; `lut`
   overrides them with your own table. `test/calibrate_thresholds.py`
   derives tables from a clean corpus in closed form (the shipped

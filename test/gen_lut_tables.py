@@ -14,7 +14,7 @@ root = sys.argv[1] if len(sys.argv) > 1 else \
 
 TABLES = [
     ('comp_lut_builtin_pal_2d', 'test/lut_pal_2d.txt', 80 * 16),
-    ('comp_lut_builtin_pal_3d', 'test/lut_pal_3d.txt', 768 * 16),
+    ('comp_lut_builtin_pal_3d', 'test/lut_pal_3d.txt', 384 * 16),
     ('comp_lut_builtin_ntsc', 'test/lut_ntsc.txt', 768 * 16),
 ]
 

@@ -275,7 +275,7 @@ for pl in range(3):
 assert bytes(core.composite.Decode(enc_t, dimensions=2, thresholds=[0.9] * 80).get_frame(0)[1]) != \
        bytes(ts.get_frame(0)[1])
 for bad_kw, needle in ((dict(dimensions=2, thresholds=[0.4] * 79), '80'),
-                       (dict(thresholds=[0.4] * 80, dimensions=3), '768'),
+                       (dict(thresholds=[0.4] * 80, dimensions=3), '384'),
                        (dict(dimensions=2, thresholds=[1.5] * 80), '(0, 1]')):
     try:
         core.composite.Decode(enc_t, **bad_kw)
@@ -328,10 +328,10 @@ for pl, want in enumerate((30000, 40960, 28672)):
     vals = [fr[pl][r, x] for r in (100, 288, 475) for x in range(48, 312, 8)]
     worst = max(abs(v - want) for v in vals)
     assert worst <= 96, ('pal2d-lut', pl, want, worst)
-core.composite.Decode(enc_t, lut=[1.0] * 12288, dimensions=3).get_frame(0)
+core.composite.Decode(enc_t, lut=[1.0] * 6144, dimensions=3).get_frame(0)
 core.composite.Restore(tex, dimensions=2, lut=[1.0] * 1280).get_frame(0)
 for bad_kw, needle in ((dict(dimensions=2, lut=[1.0] * 100), '1280'),
-                       (dict(lut=[1.0] * 100, dimensions=3), '12288'),
+                       (dict(lut=[1.0] * 100, dimensions=3), '6144'),
                        (dict(dimensions=2, lut=[1.0] * 1280, level=1), 'mutually exclusive'),
                        (dict(dimensions=2, lut=[1.0] * 1280, thresholds=[0.4] * 80),
                         'mutually exclusive'),

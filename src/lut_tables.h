@@ -7,7 +7,7 @@
  * test/gen_lut_tables.py. */
 
 extern const double comp_lut_builtin_pal_2d[1280];
-extern const double comp_lut_builtin_pal_3d[12288];
+extern const double comp_lut_builtin_pal_3d[6144];
 extern const double comp_lut_builtin_ntsc[12288];
 
 #endif
