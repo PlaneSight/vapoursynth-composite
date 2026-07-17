@@ -982,30 +982,39 @@ static void ntsc_demod_line(const comp_decode_t *d, int frame, int raster_row,
     d->fir_row(q_row, n, colorlp_q15d, COLORLP_TAPS, w);
 
     for (int x = 0; x < w; x++) {
-        const int32_t p0 = p_row[x];
-        const int32_t q0 = q_row[x];
-
-        const int32_t ul = (int32_t)(-((int64_t)p0 * bp + (int64_t)q0 * bq + 8192) >> 14);
-        const int32_t vl = (int32_t)(-((int64_t)q0 * bp - (int64_t)p0 * bq + 8192) >> 14);
-        u_row[x] = ul;
-        v_row[x] = vl;
-
-        /* comb mode follows comb.cpp adjustY (subtract the filtered
-         * chroma resynthesized on the carrier, using the values before
-         * equalization); transform mode subtracts the separated chroma
-         * directly, as Transform PAL does. The hybrid picks per sample
-         * from the source that produced the chroma. */
-        int32_t yl;
-        const int direct = d->use_transform == 1
-                           || (d->use_transform == 2 && !mask[x]);
-        if (direct) {
-            yl = (int32_t)comp_row[x] - chroma_row[x];
-        } else {
-            const int32_t re = (ul * s4[x & 3] + vl * c4[x & 3] + 16384) >> 15;
-            yl = (int32_t)comp_row[x] - re;
-        }
-        outy[x] = clamp_u16(4096 + rdiv((int64_t)(yl - d->level_black) * d->luma_num, d->luma_den));
+        u_row[x] = (int32_t)(-((int64_t)p_row[x] * bp + (int64_t)q_row[x] * bq + 8192) >> 14);
+        v_row[x] = (int32_t)(-((int64_t)q_row[x] * bp - (int64_t)p_row[x] * bq + 8192) >> 14);
     }
+
+    /* comb mode follows comb.cpp adjustY (subtract the filtered chroma
+     * resynthesized on the carrier, using the values before
+     * equalization); transform mode subtracts the separated chroma
+     * directly, as Transform PAL does. The hybrid picks per sample from
+     * the source that produced the chroma. The mode test is
+     * row-invariant, so each variant gets its own branch-free
+     * (autovectorizable) loop; the hybrid folds its per-sample pick
+     * into an and-mask select. */
+    int32_t yl_row[COMP_ACTIVE_WIDTH_NTSC];
+    if (d->use_transform == 1) {
+        for (int x = 0; x < w; x++)
+            yl_row[x] = (int32_t)comp_row[x] - chroma_row[x];
+    } else {
+        int32_t re[COMP_ACTIVE_WIDTH_NTSC];
+        for (int x = 0; x < w; x++)
+            re[x] = (u_row[x] * s4[x & 3] + v_row[x] * c4[x & 3] + 16384) >> 15;
+        if (d->use_transform == 2) {
+            for (int x = 0; x < w; x++) {
+                const int32_t dif = re[x] - chroma_row[x];
+                yl_row[x] = (int32_t)comp_row[x] - chroma_row[x]
+                          - (dif & -(int32_t)(mask[x] != 0));
+            }
+        } else {
+            for (int x = 0; x < w; x++)
+                yl_row[x] = (int32_t)comp_row[x] - re[x];
+        }
+    }
+    for (int x = 0; x < w; x++)
+        outy[x] = clamp_u16(4096 + rdiv((int64_t)(yl_row[x] - d->level_black) * d->luma_num, d->luma_den));
 
     int32_t *u_out = u_row, *v_out = v_row;
     if (d->eq) {
