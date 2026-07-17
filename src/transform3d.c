@@ -62,6 +62,8 @@
 /* FFTW's planner is not thread-safe; execute-with-new-arrays is */
 static pthread_mutex_t planner_lock = PTHREAD_MUTEX_INITIALIZER;
 
+static void t3d_build_tables(comp_transform3d_t *t);
+
 static double compute_window(int element, int limit)
 {
     return 0.5 - 0.5 * cos((2.0 * M_PI * (element + 0.5)) / limit);
@@ -77,6 +79,7 @@ int comp_transform3d_init(comp_transform3d_t *t, double threshold, int standard,
     t->use_lut = 0;
     t->evidence = (float)evidence;
     t->lut_gain = comp_get_lut_gain_fn(comp_cpu_detect());
+    t3d_build_tables(t);
     const int ytile = standard == COMP_STD_PAL ? YTILE_PAL : YTILE;
     for (int i = 0; i < COMP_T3D_NTHRESH; i++)
         t->threshold_sq[i] = (float)(threshold * threshold);
@@ -123,6 +126,91 @@ void comp_transform3d_free(comp_transform3d_t *t)
     pthread_mutex_unlock(&planner_lock);
     t->forward = NULL;
     t->inverse = NULL;
+}
+
+/* Bin-row geometry for the staged LUT filter: per bin row the float
+ * offsets of its own and reflected tile rows, plus the x = XTILE/4
+ * self-column specials (the bins that are their own reflection, kept
+ * or discarded by the carrier tables of the pair-test filters). */
+static void t3d_build_tables(comp_transform3d_t *t)
+{
+    const int pal = t->standard == COMP_STD_PAL;
+    const int yt = pal ? YTILE_PAL : YTILE;
+    int i = 0, bin = 0;
+
+    t->nspecial = 0;
+    for (int z = 0; z < ZTILE; z++) {
+        const int z_ref = pal ? (ZTILE - z) % ZTILE
+                              : ((ZTILE / 2) + ZTILE - z) % ZTILE;
+        for (int y = 0; y < yt; y++, i++, bin += 3) {
+            const int y_ref = ((yt / 2) + yt - y) % yt;
+            t->rowpair[i][0] = (z * yt + y) * XC * 2;
+            t->rowpair[i][1] = (z_ref * yt + y_ref) * XC * 2;
+
+            const int keep = pal
+                ? (y == y_ref && z == z_ref)
+                : ((y == YTILE / 4 && z == ZTILE / 4)
+                   || (y == 3 * YTILE / 4 && z == 3 * ZTILE / 4));
+            const int discard = !pal
+                && (((y == 0 || y == YTILE / 2) && (z == 0 || z == ZTILE / 2))
+                    || (y == YTILE / 4 && z == 3 * ZTILE / 4)
+                    || (y == 3 * YTILE / 4 && z == ZTILE / 4));
+            if (keep || discard) {
+                t->special[t->nspecial].bin = bin + 2;
+                t->special[t->nspecial].off = ((z * yt + y) * XC + XTILE / 4) * 2;
+                t->special[t->nspecial].keep = keep;
+                t->nspecial++;
+            }
+        }
+    }
+}
+
+/* Per-bin magnitude rows over the bin-row table: three bins per row
+ * from the x band, the reflected side read reversed. May write
+ * COMP_T3D_BINPAD floats of slack past the bin count. */
+static void t3d_mag_c(float *m_in, float *m_ref, const float *in,
+                      const int32_t (*rows)[2], int nrows)
+{
+    for (int i = 0; i < nrows; i++) {
+        const float *a = in + rows[i][0] + (XTILE / 8) * 2;
+        const float *b = in + rows[i][1] + (XTILE / 4) * 2;
+        m_in[3 * i + 0] = a[0] * a[0] + a[1] * a[1];
+        m_in[3 * i + 1] = a[2] * a[2] + a[3] * a[3];
+        m_in[3 * i + 2] = a[4] * a[4] + a[5] * a[5];
+        m_ref[3 * i + 0] = b[4] * b[4] + b[5] * b[5];
+        m_ref[3 * i + 1] = b[2] * b[2] + b[3] * b[3];
+        m_ref[3 * i + 2] = b[0] * b[0] + b[1] * b[1];
+    }
+}
+
+/* Gain application over the bin-row table, in table order: each row
+ * writes its own x band and its reflection's, so the twice-visited
+ * x = XTILE/4 column keeps its later-write-wins semantics. */
+static void t3d_apply_c(float *out, const float *in, const float *g,
+                        const int32_t (*rows)[2], int nrows)
+{
+    for (int i = 0; i < nrows; i++) {
+        const float *a = in + rows[i][0] + (XTILE / 8) * 2;
+        const float *b = in + rows[i][1] + (XTILE / 4) * 2;
+        float *oa = out + rows[i][0] + (XTILE / 8) * 2;
+        float *ob = out + rows[i][1] + (XTILE / 4) * 2;
+        const float g0 = g[3 * i + 0];
+        const float g1 = g[3 * i + 1];
+        const float g2 = g[3 * i + 2];
+
+        oa[0] = a[0] * g0;
+        oa[1] = a[1] * g0;
+        oa[2] = a[2] * g1;
+        oa[3] = a[3] * g1;
+        oa[4] = a[4] * g2;
+        oa[5] = a[5] * g2;
+        ob[0] = b[0] * g2;
+        ob[1] = b[1] * g2;
+        ob[2] = b[2] * g1;
+        ob[3] = b[3] * g1;
+        ob[4] = b[4] * g0;
+        ob[5] = b[5] * g0;
+    }
 }
 
 /* Per-bin trained-LUT gain row: for each bin, the pair-symmetry ratio
@@ -180,36 +268,24 @@ static float apply_filter_lut(const comp_transform3d_t *t,
 {
     const int pal = t->standard == COMP_STD_PAL;
     const int yt = pal ? YTILE_PAL : YTILE;
+    const int nrows = ZTILE * yt;
     const int nbins = pal ? COMP_T3D_NTHRESH_PAL : COMP_T3D_NTHRESH;
-    float m_in[COMP_T3D_NTHRESH], m_ref[COMP_T3D_NTHRESH];
-    float g[COMP_T3D_NTHRESH], r[COMP_T3D_NTHRESH];
+    float m_in[COMP_T3D_NTHRESH + COMP_T3D_BINPAD];
+    float m_ref[COMP_T3D_NTHRESH + COMP_T3D_BINPAD];
+    float g[COMP_T3D_NTHRESH + COMP_T3D_BINPAD];
+    float r[COMP_T3D_NTHRESH + COMP_T3D_BINPAD];
+    float e_num[COMP_T3D_NTHRESH], e_den[COMP_T3D_NTHRESH];
     float conf_num = 0.0f, conf_den = 0.0f;
 
     memset(out, 0, sizeof(fftwf_complex) * ZTILE * yt * XC);
 
-    int bin = 0;
-    for (int z = 0; z < ZTILE; z++) {
-        const int z_ref = pal ? (ZTILE - z) % ZTILE
-                              : ((ZTILE / 2) + ZTILE - z) % ZTILE;
-        for (int y = 0; y < yt; y++) {
-            const int y_ref = ((yt / 2) + yt - y) % yt;
-            const fftwf_complex *bi = in + (z * yt + y) * XC;
-            const fftwf_complex *bi_ref = in + (z_ref * yt + y_ref) * XC;
-            for (int x = XTILE / 8; x <= XTILE / 4; x++, bin++) {
-                const int x_ref = (XTILE / 2) - x;
-                m_in[bin] = bi[x][0] * bi[x][0] + bi[x][1] * bi[x][1];
-                m_ref[bin] = bi_ref[x_ref][0] * bi_ref[x_ref][0]
-                           + bi_ref[x_ref][1] * bi_ref[x_ref][1];
-            }
-        }
-    }
-
+    t3d_mag_c(m_in, m_ref, (const float *)in, t->rowpair, nrows);
     t->lut_gain(g, r, m_in, m_ref, t->lut, nbins);
 
     /* LF-luma evidence scales the gains per bin (PAL option) */
     if (pal && t->evidence > 0.0f) {
         static const int cy[2] = { 12, 4 };
-        bin = 0;
+        int bin = 0;
         for (int z = 0; z < ZTILE; z++) {
             for (int y = 0; y < yt; y++) {
                 for (int x = XTILE / 8; x <= XTILE / 4; x++, bin++) {
@@ -232,50 +308,43 @@ static float apply_filter_lut(const comp_transform3d_t *t,
         }
     }
 
-    bin = 0;
-    for (int z = 0; z < ZTILE; z++) {
-        const int z_ref = pal ? (ZTILE - z) % ZTILE
-                              : ((ZTILE / 2) + ZTILE - z) % ZTILE;
-        for (int y = 0; y < yt; y++) {
-            const int y_ref = ((yt / 2) + yt - y) % yt;
-            const fftwf_complex *bi = in + (z * yt + y) * XC;
-            const fftwf_complex *bi_ref = in + (z_ref * yt + y_ref) * XC;
-            fftwf_complex *bo = out + (z * yt + y) * XC;
-            fftwf_complex *bo_ref = out + (z_ref * yt + y_ref) * XC;
-            for (int x = XTILE / 8; x <= XTILE / 4; x++, bin++) {
-                const int x_ref = (XTILE / 2) - x;
-
-                if (x == x_ref) {
-                    /* self-column specials, as in the pair-test modes */
-                    if (pal ? (y == y_ref && z == z_ref)
-                            : ((y == YTILE / 4 && z == ZTILE / 4)
-                               || (y == 3 * YTILE / 4 && z == 3 * ZTILE / 4))) {
-                        bo[x][0] = bi[x][0];
-                        bo[x][1] = bi[x][1];
-                        conf_num += m_in[bin];
-                        conf_den += m_in[bin];
-                        continue;
-                    }
-                    if (!pal
-                        && (((y == 0 || y == YTILE / 2)
-                             && (z == 0 || z == ZTILE / 2))
-                            || (y == YTILE / 4 && z == 3 * ZTILE / 4)
-                            || (y == 3 * YTILE / 4 && z == ZTILE / 4)))
-                        continue;
-                }
-
-                const float gb = g[bin];
-                bo[x][0] = bi[x][0] * gb;
-                bo[x][1] = bi[x][1] * gb;
-                bo_ref[x_ref][0] = bi_ref[x_ref][0] * gb;
-                bo_ref[x_ref][1] = bi_ref[x_ref][1] * gb;
-                const float e = gb * gb * (m_in[bin] + m_ref[bin]);
-                conf_num += e * r[bin];
-                conf_den += e;
-            }
+    /* per-bin confidence terms; the specials override theirs, and the
+     * kept ones write at unit gain (the identical bits of a copy) */
+    for (int i = 0; i < nbins; i++) {
+        const float e = g[i] * g[i] * (m_in[i] + m_ref[i]);
+        e_num[i] = e * r[i];
+        e_den[i] = e;
+    }
+    for (int s = 0; s < t->nspecial; s++) {
+        const int b = t->special[s].bin;
+        if (t->special[s].keep) {
+            g[b] = 1.0f;
+            e_num[b] = m_in[b];
+            e_den[b] = m_in[b];
+        } else {
+            e_num[b] = 0.0f;
+            e_den[b] = 0.0f;
         }
     }
 
+    t3d_apply_c((float *)out, (const float *)in, g, t->rowpair, nrows);
+
+    /* discarded self-column bins stay zero; both their writers are
+     * themselves discards, so a post-pass restores the memset state */
+    for (int s = 0; s < t->nspecial; s++) {
+        if (!t->special[s].keep) {
+            ((float *)out)[t->special[s].off + 0] = 0.0f;
+            ((float *)out)[t->special[s].off + 1] = 0.0f;
+        }
+    }
+
+    /* the sums are float accumulation in bin order; a skipped bin and
+     * an added +0.0 term are the same bits, so the discards' zero
+     * terms preserve exactness */
+    for (int i = 0; i < nbins; i++) {
+        conf_num += e_num[i];
+        conf_den += e_den[i];
+    }
     return conf_den > 0.0f ? conf_num / conf_den : 0.0f;
 }
 

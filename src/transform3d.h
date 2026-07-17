@@ -30,6 +30,13 @@
                           * (COMP_T3D_XTILE / 4 - COMP_T3D_XTILE / 8 + 1))
 #define COMP_T3D_NTHRESH_PAL (COMP_T3D_NTHRESH / 2)
 
+/* one bin row per (z, y): the three x band bins */
+#define COMP_T3D_NROWS (COMP_T3D_ZTILE * COMP_T3D_YTILE)
+
+/* the row kernels store four lanes per three-bin row, so per-bin
+ * arrays carry this much slack past the bin count */
+#define COMP_T3D_BINPAD 4
+
 typedef struct comp_field_view_t comp_field_view_t;
 
 struct comp_field_view_t {
@@ -62,6 +69,17 @@ struct comp_transform3d_t {
     float window[COMP_T3D_ZTILE][COMP_T3D_YTILE][COMP_T3D_XTILE];
     float threshold_sq[COMP_T3D_NTHRESH];
     float lut[COMP_T3D_NTHRESH][COMP_LUT_K];
+    /* bin-row geometry for the staged LUT filter: per bin row the
+     * float offsets of its own and reflected tile rows, and the
+     * self-column special bins (kept carriers / discarded non-carriers
+     * at x = XTILE/4, where the bin is its own reflection) */
+    int32_t rowpair[COMP_T3D_NROWS][2];
+    struct {
+        int bin;      /* linear bin index */
+        int32_t off;  /* float offset of the bin in the tile */
+        int keep;
+    } special[8];
+    int nspecial;
 };
 
 /* PAL chroma on the displaced lattice is symmetric about the measured
