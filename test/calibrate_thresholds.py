@@ -15,9 +15,11 @@
 # closed form, no iteration.
 #
 # usage: calibrate_thresholds.py composite.so corpus_dirs [frames_per_clip] [2d|3d|ntsc]
-# 2d/3d calibrate Transform PAL on the 625-line corpus; ntsc calibrates
-# Transform NTSC 3D on the 525-line corpus (per-bin t0 values for the
-# shaped threshold, by inverting the shaping, plus the soft LUT).
+# 2d/3d calibrate Transform PAL on the 625-line corpus (3d on the
+# displaced field-line lattice the plugin separates on); ntsc
+# calibrates Transform NTSC 3D on the 525-line corpus (per-bin t0
+# values for the shaped threshold, by inverting the shaping, plus the
+# soft LUT).
 # corpus_dirs is a colon-separated directory list; the last 3 clips of
 # each directory are held out for validation. Clips may mix 486-line
 # (full raster, assumed BFF) and 480-line material; 480-line clips are
@@ -44,9 +46,12 @@ MODE = sys.argv[4] if len(sys.argv) > 4 else '2d'
 
 XTILE, YTILE = 32, 16                       # 2D: x samples, y field lines
 X3, Y3, Z3 = 16, 32, 8                      # 3D: x samples, y frame lines, z fields
+Y3S = Y3 // 2                               # PAL 3D: displaced field-line tiles
 BIN_X = list(range(XTILE // 8, XTILE // 4 + 1))
 BIN_X3 = list(range(X3 // 8, X3 // 4 + 1))
-NBINS = (YTILE * len(BIN_X)) if MODE == '2d' else (Z3 * Y3 * len(BIN_X3))
+NBINS = (YTILE * len(BIN_X)) if MODE == '2d' \
+    else (Z3 * Y3S * len(BIN_X3)) if MODE == '3d' \
+    else (Z3 * Y3 * len(BIN_X3))
 ALPHA = 2.0
 RBUCKETS = 200
 STANDARD = 'ntsc' if MODE == 'ntsc' else 'pal'
@@ -137,8 +142,8 @@ def tile_stats(comp_nr, comp_lum, comp_chr, hist_lum, hist_chr):
                             b += 1
 
 
-def tile_stats_3d(comp_nr, comp_lum, comp_chr, hist_lum, hist_chr,
-                  rows=None, parity=PARITY):
+def tile_stats_3d_ntsc(comp_nr, comp_lum, comp_chr, hist_lum, hist_chr,
+                       rows=None, parity=PARITY):
     if rows is None:
         rows = H
     # 3D tiles in frame-line space: rows of the other field are black,
@@ -173,6 +178,60 @@ def tile_stats_3d(comp_nr, comp_lum, comp_chr, hist_lum, hist_chr,
         for ty in range(0, rows - Y3 + 1, Y3):
             for tx in range(16, WR - X3 - 16, X3 * 2):
                 pw = [np.abs(np.fft.rfftn(tile(c, tz, ty, tx))) ** 2
+                      for c in (comp_nr, comp_lum, comp_chr)]
+                for b, (z, y, x, zr, yr, xr) in enumerate(refs):
+                    if z == zr and y == yr and x == xr:
+                        continue
+                    pin, pref = pw[0][z, y, x], pw[0][zr, yr, xr]
+                    hi = max(pin, pref)
+                    r = (min(pin, pref) / hi) if hi > 0 else 1.0
+                    bucket = min(int(r * RBUCKETS), RBUCKETS - 1)
+                    hist_lum[b, bucket] += pw[1][z, y, x] + pw[1][zr, yr, xr]
+                    hist_chr[b, bucket] += pw[2][z, y, x] + pw[2][zr, yr, xr]
+
+
+def tile_stats_3d_pal(comp_nr, comp_lum, comp_chr, hist_lum, hist_chr,
+                      rows=None):
+    # PAL 3D separates on the displaced field-line lattice
+    # (GB 2365247 A): field z is displaced down ceil(z/2) field rows,
+    # making a dense 16-row lattice with the carriers at single exact
+    # bins sharing one reflection map, as the plugin filter does.
+    # PAL only (parity 0: field g occupies frame rows g mod 2).
+    if rows is None:
+        rows = H
+
+    def window(nn):
+        return 0.5 - 0.5 * np.cos(2 * np.pi * (np.arange(nn) + 0.5) / nn)
+
+    win = window(Z3)[:, None, None] * window(Y3S)[None, :, None] * window(X3)[None, None, :]
+    refs = [(z, y, x,
+             (Z3 - z) % Z3, ((Y3S // 2) + Y3S - y) % Y3S, X3 // 2 - x)
+            for z in range(Z3) for y in range(Y3S) for x in BIN_X3]
+
+    nfields = comp_nr.shape[0] * 2
+    frows = rows // 2
+
+    def field(c, g):
+        return c[g // 2, g % 2::2].astype(np.float64)
+
+    def tile(c, tz, tr, tx):
+        t = np.full((Z3, Y3S, X3), 16384.0)
+        for z in range(Z3):
+            g = tz + z
+            if g < 0 or g >= nfields:
+                continue
+            f = field(c, g)
+            sz = (z + 1) // 2
+            r0 = tr - sz
+            c0, c1 = max(r0, 0), min(r0 + Y3S, frows)
+            if c0 < c1:
+                t[z, c0 - r0:c1 - r0] = f[c0:c1, tx:tx + X3]
+        return t * win
+
+    for tz in range(0, nfields - Z3 + 1, Z3 // 2):
+        for tr in range(0, frows - Y3S + 1, Y3S):
+            for tx in range(16, WR - X3 - 16, X3 * 2):
+                pw = [np.abs(np.fft.rfftn(tile(c, tz, tr, tx))) ** 2
                       for c in (comp_nr, comp_lum, comp_chr)]
                 for b, (z, y, x, zr, yr, xr) in enumerate(refs):
                     if z == zr and y == yr and x == xr:
@@ -303,9 +362,12 @@ for path in train:
     if MODE == '2d':
         tile_stats(comp_nr, encode(lum_only, tff), encode(chr_only, tff),
                    hist_lum, hist_chr)
+    elif MODE == '3d':
+        tile_stats_3d_pal(comp_nr, encode(lum_only, tff),
+                          encode(chr_only, tff), hist_lum, hist_chr)
     else:
-        tile_stats_3d(comp_nr, encode(lum_only, tff), encode(chr_only, tff),
-                      hist_lum, hist_chr, rows=rows, parity=parity)
+        tile_stats_3d_ntsc(comp_nr, encode(lum_only, tff), encode(chr_only, tff),
+                           hist_lum, hist_chr, rows=rows, parity=parity)
     print(f'  trained on {os.path.basename(path)}')
 
 np.savez(f'threshold_hists_{MODE}.npz', lum=hist_lum, chr=hist_chr)
