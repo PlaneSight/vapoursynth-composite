@@ -28,7 +28,7 @@ unsigned comp_cpu_detect(void)
             flags |= COMP_CPU_SSE41;
     }
 
-    if (X(r[2], 0x18000000) && max_leaf >= 7) { /* OSXSAVE/AVX */
+    if (X(r[2], 0x18001000) && max_leaf >= 7) { /* FMA/OSXSAVE/AVX */
         const uint64_t xcr0 = comp_cpu_xgetbv(0);
         if (X(xcr0, 0x00000006)) { /* XMM/YMM state */
             comp_cpu_cpuid(r, 7, 0);

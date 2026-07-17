@@ -54,9 +54,14 @@ void checkasm_test_lut_gain(void)
             memset(r_a, 0x55, sizeof(r_a));
             checkasm_call_ref(g_c, r_c, m_in, m_ref, lut, nbins[i]);
             checkasm_call_new(g_a, r_a, m_in, m_ref, lut, nbins[i]);
-            /* bitwise: the kernel contract is byte-identical floats */
-            checkasm_check1d(uint32_t, (const uint32_t *)g_c,
-                             (const uint32_t *)g_a, nbins[i], "g");
+            /* the fma3 tier fuses the interpolation's mul+add — one
+             * rounding fewer than the unfused C — so g carries a small
+             * ULP budget; r has no fused path and stays bitwise */
+            for (int j = 0; j < nbins[i]; j++)
+                if (!checkasm_float_near_abs_eps_ulp(g_c[j], g_a[j], 1e-7f, 4)) {
+                    checkasm_fail_func("g[%d]: %.9g vs %.9g", j, g_c[j], g_a[j]);
+                    break;
+                }
             checkasm_check1d(uint32_t, (const uint32_t *)r_c,
                              (const uint32_t *)r_a, nbins[i], "r");
         }

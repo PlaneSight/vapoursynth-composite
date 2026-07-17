@@ -24,8 +24,9 @@ SECTION .text
 ; lo <= hi, so the only non-finite quotient is 0/0 = NaN, and MINPS
 ; returning its second operand on NaN turns exactly those lanes into
 ; the reference's 1.0 (finite lanes pass, as r never exceeds 1). The
-; interpolation must stay mul-then-add: the reference is compiled for
-; baseline x86-64, whose codegen cannot contract it into an FMA.
+; fma3 tier fuses the interpolation -- one rounding fewer than the
+; unfused C reference, so g carries a small ULP tolerance in checkasm;
+; the sse4 tier stays mul-then-add and bit-exact.
 %macro LUT_GAIN 0
 cglobal lut_gain, 6, 9, 8, mmsize, g, r, mi, mr, lut, n, x, i0, i1
     movu         m5, [d_lanebase]   ; running dword index of lane 0's knot 0
@@ -84,8 +85,12 @@ cglobal lut_gain, 6, 9, 8, mmsize, g, r, mi, mr, lut, n, x, i0, i1
 %endrep
 
     subps        m7, m0             ; row[k+1] - row[k]
-    mulps        m7, m2             ; * frac (no FMA: must match the C rounding)
+%if cpuflag(fma3)
+    vfmadd231ps  m0, m7, m2         ; g = row[k] + (row[k+1] - row[k]) * frac
+%else
+    mulps        m7, m2
     addps        m0, m7
+%endif
     movu         [gq + xq*4], m0
 
     paddd        m5, m6

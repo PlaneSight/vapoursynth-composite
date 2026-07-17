@@ -55,10 +55,24 @@ void checkasm_test_t3d_filter(void)
                 memset(mr_a, 0x55, sizeof(mr_a));
                 checkasm_call_ref(mi_c, mr_c, tile, rows, nrows);
                 checkasm_call_new(mi_a, mr_a, tile, rows, nrows);
-                checkasm_check1d(uint32_t, (const uint32_t *)mi_c,
-                                 (const uint32_t *)mi_a, 3 * nrows, "m_in");
-                checkasm_check1d(uint32_t, (const uint32_t *)mr_c,
-                                 (const uint32_t *)mr_a, 3 * nrows, "m_ref");
+                /* the fma3 tier single-rounds the im^2 accumulation —
+                 * one rounding fewer than the unfused C — so the
+                 * magnitudes carry a small ULP budget (they are sums
+                 * of squares: no cancellation to magnify it) */
+                for (int j = 0; j < 3 * nrows; j++) {
+                    if (!checkasm_float_near_abs_eps_ulp(mi_c[j], mi_a[j],
+                                                         1e-6f, 4)) {
+                        checkasm_fail_func("m_in[%d]: %.9g vs %.9g",
+                                           j, mi_c[j], mi_a[j]);
+                        break;
+                    }
+                    if (!checkasm_float_near_abs_eps_ulp(mr_c[j], mr_a[j],
+                                                         1e-6f, 4)) {
+                        checkasm_fail_func("m_ref[%d]: %.9g vs %.9g",
+                                           j, mr_c[j], mr_a[j]);
+                        break;
+                    }
+                }
             }
             checkasm_bench_new(mi_a, mr_a, tile, rows, NROWS);
         }

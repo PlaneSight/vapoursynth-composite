@@ -13,13 +13,23 @@ SECTION .text
 ; written reversed. Rows are XCOMPLEX = 9 complex (72 bytes), so the
 ; 16-byte tails of the band loads stay inside the row.
 
-; squared magnitudes of 4 complex values from two 16-byte loads
+; Squared magnitudes of 4 complex values from two 16-byte loads. The
+; fma3 form single-rounds the im^2 accumulation -- one rounding fewer
+; than the unfused C reference, covered by a small ULP tolerance in
+; checkasm; the sse2 form stays bit-exact.
 %macro MAG4 3 ; out, srclo, srchi (clobbers srclo, srchi)
+%if cpuflag(fma3)
+    shufps       %1, %2, %3, 0x88
+    shufps       %2, %2, %3, 0xDD
+    mulps        %1, %1
+    vfmadd231ps  %1, %2, %2
+%else
     mulps        %2, %2
     mulps        %3, %3
     shufps       %1, %2, %3, 0x88
     shufps       %2, %2, %3, 0xDD
     addps        %1, %2
+%endif
 %endmacro
 
 ; void t3d_mag(float *m_in, float *m_ref, const float *in,
