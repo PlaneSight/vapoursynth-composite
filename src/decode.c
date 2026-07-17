@@ -18,6 +18,7 @@
  */
 
 #include <math.h>
+#include <stddef.h>
 #include <stdlib.h>
 #include <string.h>
 
@@ -39,10 +40,11 @@ static const float zero_line_f[WIDTH];
 /* color low-pass for the demodulated NTSC products (deemp.h
  * c_colorlp_b rounded to Q15; the reference's +0.2% DC gain is kept) */
 #define COLORLP_TAPS 17
-static const int16_t colorlp_q15[COLORLP_TAPS] = {
-    73, 317, 200, -682, -1597, -503, 3726, 9094, 11579,
-    9094, 3726, -503, -1597, -682, 200, 317, 73,
-};
+#define COLORLP_COEFS \
+    73, 317, 200, -682, -1597, -503, 3726, 9094, 11579, \
+    9094, 3726, -503, -1597, -682, 200, 317, 73
+static const int16_t colorlp_q15[COLORLP_TAPS] = { COLORLP_COEFS };
+static const int32_t colorlp_q15d[COLORLP_TAPS] = { COLORLP_COEFS };
 
 /* response of a symmetric FIR (Q15 taps) at normalized angular freq w */
 static double fir_response_q15(const int16_t *taps, int n, double w)
@@ -116,19 +118,23 @@ static void design_narrow(comp_decode_t *d, double fs_hz)
     d->narrow_q15[c] += 32768 - total;
 }
 
+/* stage a row into a zero-winged buffer and run the dispatched FIR;
+ * the wings reproduce the former per-sample bounds check exactly */
+static void fir_row_staged(const comp_decode_t *d, const int32_t *coef,
+                           int taps, const int32_t *in, int32_t *out, int w)
+{
+    int32_t in_p[COMP_FIR_ROW_ALIGN(COMP_ACTIVE_WIDTH_PAL) + COMP_EQ_TAPS - 1];
+    int32_t out_p[COMP_FIR_ROW_ALIGN(COMP_ACTIVE_WIDTH_PAL)];
+
+    memset(in_p, 0, sizeof(in_p));
+    memcpy(in_p + taps / 2, in, sizeof(*in) * w);
+    d->fir_row(out_p, in_p, coef, taps, w);
+    memcpy(out, out_p, sizeof(*out) * w);
+}
+
 static void narrow_row(const comp_decode_t *d, const int32_t *in, int32_t *out, int w)
 {
-    const int half = COMP_NARROW_TAPS / 2;
-
-    for (int x = 0; x < w; x++) {
-        int64_t acc = 0;
-        for (int j = 0; j < COMP_NARROW_TAPS; j++) {
-            const int k = x + j - half;
-            if (k >= 0 && k < w)
-                acc += (int64_t)d->narrow_q15[j] * in[k];
-        }
-        out[x] = (int32_t)((acc + 16384) >> 15);
-    }
+    fir_row_staged(d, d->narrow_q15, COMP_NARROW_TAPS, in, out, w);
 }
 
 int comp_decode_init(comp_decode_t *d, int standard, double threshold,
@@ -168,6 +174,7 @@ int comp_decode_init(comp_decode_t *d, int standard, double threshold,
     d->eq = eq;
     d->cti = !!cti;
     d->pal_demod = comp_get_pal_demod_fn(comp_cpu_detect());
+    d->fir_row = comp_get_fir_row_q15_fn(comp_cpu_detect());
     if (eq == 2)
         design_narrow(d, standard == COMP_STD_PAL ? 4.0 * 4433618.75
                                                   : 4.0 * 3579545.0);
@@ -412,17 +419,7 @@ static void scratch_release(comp_decode_t *d, comp_decode_scratch_t *s)
 /* equalize one row of demodulated chroma levels in place */
 static void eq_row(const comp_decode_t *d, const int32_t *in, int32_t *out, int w)
 {
-    const int half = COMP_EQ_TAPS / 2;
-
-    for (int x = 0; x < w; x++) {
-        int64_t acc = 0;
-        for (int j = 0; j < COMP_EQ_TAPS; j++) {
-            const int k = x + j - half;
-            if (k >= 0 && k < w)
-                acc += (int64_t)d->eq_q15[j] * in[k];
-        }
-        out[x] = (int32_t)((acc + 16384) >> 15);
-    }
+    fir_row_staged(d, d->eq_q15, COMP_EQ_TAPS, in, out, w);
 }
 
 /* Luma-guided chroma transient improvement: at a coincident
@@ -546,6 +543,18 @@ static void pal_demod_row_c(int32_t *u, int32_t *v,
     }
 }
 
+/* C reference for the dispatched FIR row kernel; see decode.h */
+static void fir_row_q15_c(int32_t *out, const int32_t *in,
+                          const int32_t *coef, int taps, int w)
+{
+    for (int x = 0; x < w; x++) {
+        int64_t acc = 0;
+        for (int j = 0; j < taps; j++)
+            acc += (int64_t)coef[j] * in[x + j];
+        out[x] = (int32_t)((acc + 16384) >> 15);
+    }
+}
+
 #if defined(__x86_64__)
 #define PAL_DEMOD_ROW_ASM(isa)                                              \
     void comp_pal_demod_row_##isa(int32_t *u, int32_t *v,                   \
@@ -556,7 +565,28 @@ static void pal_demod_row_c(int32_t *u, int32_t *v,
 PAL_DEMOD_ROW_ASM(sse4);
 PAL_DEMOD_ROW_ASM(avx2);
 PAL_DEMOD_ROW_ASM(avx512);
+
+#define FIR_ROW_Q15_ASM(isa)                                                \
+    void comp_fir_row_q15_##isa(int32_t *out, const int32_t *in,            \
+                                const int32_t *coef, int taps, int w)
+FIR_ROW_Q15_ASM(sse4);
+FIR_ROW_Q15_ASM(avx2);
+FIR_ROW_Q15_ASM(avx512);
 #endif
+
+comp_fir_row_q15_fn comp_get_fir_row_q15_fn(unsigned cpu)
+{
+#if defined(__x86_64__)
+    if (cpu & COMP_CPU_AVX512)
+        return comp_fir_row_q15_avx512;
+    if (cpu & COMP_CPU_AVX2)
+        return comp_fir_row_q15_avx2;
+    if (cpu & COMP_CPU_SSE41)
+        return comp_fir_row_q15_sse4;
+#endif
+    (void)cpu;
+    return fir_row_q15_c;
+}
 
 comp_pal_demod_fn comp_get_pal_demod_fn(unsigned cpu)
 {
@@ -864,8 +894,10 @@ static void ntsc_demod_line(const comp_decode_t *d, int frame, int raster_row,
 {
     const int w = d->width;
     const int half = COLORLP_TAPS / 2;
-    int32_t m[COMP_ACTIVE_WIDTH_NTSC + COLORLP_TAPS];
-    int32_t n[COMP_ACTIVE_WIDTH_NTSC + COLORLP_TAPS];
+    int32_t m[COMP_FIR_ROW_ALIGN(COMP_ACTIVE_WIDTH_NTSC) + COLORLP_TAPS - 1];
+    int32_t n[COMP_FIR_ROW_ALIGN(COMP_ACTIVE_WIDTH_NTSC) + COLORLP_TAPS - 1];
+    int32_t p_row[COMP_FIR_ROW_ALIGN(COMP_ACTIVE_WIDTH_NTSC)];
+    int32_t q_row[COMP_FIR_ROW_ALIGN(COMP_ACTIVE_WIDTH_NTSC)];
 
     memset(m, 0, sizeof(m));
     memset(n, 0, sizeof(n));
@@ -887,14 +919,12 @@ static void ntsc_demod_line(const comp_decode_t *d, int frame, int raster_row,
     int32_t u_row[COMP_ACTIVE_WIDTH_NTSC], v_row[COMP_ACTIVE_WIDTH_NTSC];
     int32_t u_eq[COMP_ACTIVE_WIDTH_NTSC], v_eq[COMP_ACTIVE_WIDTH_NTSC];
 
+    d->fir_row(p_row, m, colorlp_q15d, COLORLP_TAPS, w);
+    d->fir_row(q_row, n, colorlp_q15d, COLORLP_TAPS, w);
+
     for (int x = 0; x < w; x++) {
-        int64_t p = 0, q = 0;
-        for (int j = 0; j < COLORLP_TAPS; j++) {
-            p += (int64_t)colorlp_q15[j] * m[x + j];
-            q += (int64_t)colorlp_q15[j] * n[x + j];
-        }
-        const int32_t p0 = (int32_t)((p + 16384) >> 15);
-        const int32_t q0 = (int32_t)((q + 16384) >> 15);
+        const int32_t p0 = p_row[x];
+        const int32_t q0 = q_row[x];
 
         const int32_t ul = (int32_t)(-((int64_t)p0 * bp + (int64_t)q0 * bq + 8192) >> 14);
         const int32_t vl = (int32_t)(-((int64_t)q0 * bp - (int64_t)p0 * bq + 8192) >> 14);
@@ -964,12 +994,16 @@ static void crude_decode_frame(const comp_decode_t *d, int frame, int rows,
 {
     const int w = d->width;
     const int half = COLORLP_TAPS / 2;
+    int32_t m[COMP_FIR_ROW_ALIGN(COMP_ACTIVE_WIDTH_PAL) + COLORLP_TAPS - 1];
+    int32_t n[COMP_FIR_ROW_ALIGN(COMP_ACTIVE_WIDTH_PAL) + COLORLP_TAPS - 1];
 
+    memset(m, 0, sizeof(m));
+    memset(n, 0, sizeof(n));
     for (int r = 0; r < rows; r++) {
         const uint16_t *line = comp + r * comp_stride;
         int32_t est[COMP_ACTIVE_WIDTH_PAL];
-        int32_t m[COMP_ACTIVE_WIDTH_PAL + COLORLP_TAPS];
-        int32_t n[COMP_ACTIVE_WIDTH_PAL + COLORLP_TAPS];
+        int32_t p_row[COMP_FIR_ROW_ALIGN(COMP_ACTIVE_WIDTH_PAL)];
+        int32_t q_row[COMP_FIR_ROW_ALIGN(COMP_ACTIVE_WIDTH_PAL)];
         int32_t u_row[COMP_ACTIVE_WIDTH_PAL], v_row[COMP_ACTIVE_WIDTH_PAL];
         int32_t u_eq[COMP_ACTIVE_WIDTH_PAL], v_eq[COMP_ACTIVE_WIDTH_PAL];
 
@@ -977,10 +1011,6 @@ static void crude_decode_frame(const comp_decode_t *d, int frame, int rows,
         for (int x = 2; x < w - 2; x++)
             est[x] = (2 * (int32_t)line[x] - line[x - 2] - line[x + 2]) / 4;
 
-        memset(m, 0, sizeof(int32_t) * half);
-        memset(n, 0, sizeof(int32_t) * half);
-        memset(&m[half + w], 0, sizeof(int32_t) * half);
-        memset(&n[half + w], 0, sizeof(int32_t) * half);
         for (int x = 0; x < w; x++) {
             const int32_t sn = (x & 3) == 1 ? 1 : (x & 3) == 3 ? -1 : 0;
             const int32_t cs = (x & 3) == 0 ? 1 : (x & 3) == 2 ? -1 : 0;
@@ -992,14 +1022,12 @@ static void crude_decode_frame(const comp_decode_t *d, int frame, int rows,
         const int32_t sn0 = d->sin_q15[sc.phase];
         const int32_t cs0 = d->sin_q15[(sc.phase + d->den / 4) % d->den];
 
+        d->fir_row(p_row, m, colorlp_q15d, COLORLP_TAPS, w);
+        d->fir_row(q_row, n, colorlp_q15d, COLORLP_TAPS, w);
+
         for (int x = 0; x < w; x++) {
-            int64_t p = 0, q = 0;
-            for (int j = 0; j < COLORLP_TAPS; j++) {
-                p += (int64_t)colorlp_q15[j] * m[x + j];
-                q += (int64_t)colorlp_q15[j] * n[x + j];
-            }
-            const int32_t p0 = (int32_t)((p + 16384) >> 15);
-            const int32_t q0 = (int32_t)((q + 16384) >> 15);
+            const int32_t p0 = p_row[x];
+            const int32_t q0 = q_row[x];
             u_row[x] = (int32_t)(((int64_t)p0 * cs0 + (int64_t)q0 * sn0 + 8192) >> 14);
             v_row[x] = sc.vswitch *
                 (int32_t)(((int64_t)q0 * cs0 - (int64_t)p0 * sn0 + 8192) >> 14);

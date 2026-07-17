@@ -27,7 +27,7 @@ if host_machine.cpu_family() == 'x86_64'
         '-I' + meson.current_source_dir() / 'x86/',
         language: 'nasm',
     )
-    core_sources += files('x86/cpu.asm', 'x86/pal_demod.asm')
+    core_sources += files('x86/cpu.asm', 'x86/pal_demod.asm', 'x86/fir_row.asm')
 endif
 
 core = static_library('composite_core',
@@ -79,7 +79,8 @@ test('decode', executable('test_decode',
 checkasm_dep = dependency('checkasm', required: get_option('checkasm'), allow_fallback: true)
 if checkasm_dep.found()
     checkasm_exe = executable('checkasm',
-        files('test/checkasm/main.c', 'test/checkasm/pal_demod.c'),
+        files('test/checkasm/main.c', 'test/checkasm/pal_demod.c',
+              'test/checkasm/fir_row.c'),
         dependencies: [checkasm_dep] + core_deps,
         include_directories: include_directories('src'),
         link_with: core,

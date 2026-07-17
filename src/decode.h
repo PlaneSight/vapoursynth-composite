@@ -30,6 +30,25 @@ typedef void (*comp_pal_demod_fn)(int32_t *u, int32_t *v,
 
 comp_pal_demod_fn comp_get_pal_demod_fn(unsigned cpu);
 
+/* Round a row length up to the SIMD write bound: FIR-row tiers may
+ * write out and read in up to this many samples, so row buffers are
+ * sized with it. */
+#define COMP_FIR_ROW_ALIGN(w) (((w) + 15) & ~15)
+
+/* One Q15 FIR pass over a zero-padded row:
+ * out[x] = (int32_t)((sum_j (int64_t)coef[j] * in[x + j] + 16384) >> 15)
+ * for 0 <= x < w. in holds w + taps - 1 elements (the caller centres
+ * its data and zeroes the wings, reproducing the C bounds check).
+ * SIMD tiers write out and read in through COMP_FIR_ROW_ALIGN(w)
+ * samples, so out has that capacity and in that plus taps - 1; the
+ * padding lanes of out are scratch. Accumulator contract:
+ * |acc| < 2^45 for any x in the padded span. */
+typedef void (*comp_fir_row_q15_fn)(int32_t *out, const int32_t *in,
+                                    const int32_t *coef, int taps, int w);
+
+comp_fir_row_q15_fn comp_get_fir_row_q15_fn(unsigned cpu);
+
+
 typedef struct comp_decode_scratch_t comp_decode_scratch_t;
 
 struct comp_decode_scratch_t {
@@ -71,6 +90,7 @@ struct comp_decode_t {
     int16_t sin_q15[COMP_SC_DEN_PAL];
     int32_t cfilt_q16[COMP_DECODE_FILTER_SIZE + 1][4];
     comp_pal_demod_fn pal_demod;
+    comp_fir_row_q15_fn fir_row;
     comp_transform2d_t transform;
     comp_transform3d_t transform3;
     comp_t3d_cache_t t3cache;    /* 3D transform slab cache */

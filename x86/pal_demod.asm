@@ -3,6 +3,7 @@
 ;*****************************************************************************
 
 %include "x86inc.asm"
+%include "util.asm"
 
 SECTION_RODATA 64
 
@@ -18,28 +19,6 @@ d_sub26:   times 16 dd 1 << 26
 SECTION .text
 
 %define FS 7
-
-; splat a dword from memory into all lanes
-%macro SPLATD 2 ; dst, src
-%if cpuflag(avx2)
-    vpbroadcastd %1, %2
-%else
-    movd         %1, %2
-    pshufd       %1, %1, 0x00
-%endif
-%endmacro
-
-; select the odd dword lanes of %3 over the even results in %2
-; (%3's odd lanes were filled by a qword shift; %1 must not alias %3)
-%macro BLEND_ODD 3 ; out, even, odd
-%if mmsize == 64
-    vpblendmd    %1{k2}, %2, %3
-%elif cpuflag(avx2)
-    vpblendd     %1, %2, %3, 0xAA
-%else
-    pblendw      %1, %2, %3, 0xCC
-%endif
-%endmacro
 
 ; one filter term: acc_e/acc_o += ((base[l] + base[r]) * coef) as
 ; even/odd 64-bit lane products of the dword sums
