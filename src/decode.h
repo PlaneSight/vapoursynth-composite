@@ -48,6 +48,33 @@ typedef void (*comp_fir_row_q15_fn)(int32_t *out, const int32_t *in,
 
 comp_fir_row_q15_fn comp_get_fir_row_q15_fn(unsigned cpu);
 
+/* One comb candidate of the NTSC 3D split, prepared per row: the
+ * bounds and phase tests of the reference's per-pixel candidate table
+ * depend only on the row, so the driver hoists them and the kernel
+ * evaluates all eight candidates unconditionally. The layout is fixed
+ * for the asm (static asserts in decode.c). */
+typedef struct comp_split3d_cand_t {
+    const float *c1;      /* candidate row of 1D chroma, indexed x + off */
+    const float *c2;      /* candidate row of 2D chroma */
+    const uint16_t *line; /* candidate composite row */
+    int32_t off;          /* ch - x: -2, 0 or +2 */
+    int32_t have_sample;  /* candidate row is inside the frame */
+    int32_t have_penalty; /* and its chroma phase opposes the current row */
+    double bonus;         /* line/field/frame preference bias */
+} comp_split3d_cand_t;
+
+/* Adaptive 3D comb candidate selection for one NTSC row, x in
+ * [3, w - 3) (the caller writes the edge samples): pick the
+ * lowest-penalty candidate, earliest index winning ties, and emit
+ * clamp_i16(lrintf(tc)) with tc = c2c[x] for a same-frame winner or
+ * (c1c[x] - sample) / 2 otherwise. irescale is passed by pointer to
+ * keep the asm ABI GPR-only. w - 6 must be a multiple of 16. */
+typedef void (*comp_split3d_row_fn)(int16_t *out, const float *c1c,
+                                    const float *c2c, const uint16_t *ref,
+                                    const comp_split3d_cand_t *cand,
+                                    const double *irescale, int w);
+
+comp_split3d_row_fn comp_get_split3d_row_fn(unsigned cpu);
 
 typedef struct comp_decode_scratch_t comp_decode_scratch_t;
 
@@ -91,6 +118,7 @@ struct comp_decode_t {
     int32_t cfilt_q16[COMP_DECODE_FILTER_SIZE + 1][4];
     comp_pal_demod_fn pal_demod;
     comp_fir_row_q15_fn fir_row;
+    comp_split3d_row_fn split3d_row;
     comp_transform2d_t transform;
     comp_transform3d_t transform3;
     comp_t3d_cache_t t3cache;    /* 3D transform slab cache */

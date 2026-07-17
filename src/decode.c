@@ -175,6 +175,7 @@ int comp_decode_init(comp_decode_t *d, int standard, double threshold,
     d->cti = !!cti;
     d->pal_demod = comp_get_pal_demod_fn(comp_cpu_detect());
     d->fir_row = comp_get_fir_row_q15_fn(comp_cpu_detect());
+    d->split3d_row = comp_get_split3d_row_fn(comp_cpu_detect());
     if (eq == 2)
         design_narrow(d, standard == COMP_STD_PAL ? 4.0 * 4433618.75
                                                   : 4.0 * 3579545.0);
@@ -796,6 +797,85 @@ static int ntsc_line_phase(int frame, int raster_row)
  * from this line, neighboring lines, or the neighboring fields and
  * frames, and comb against it; if a same-frame candidate wins, reuse
  * the 2D result. Buffers are indexed 0/1/2 = previous/current/next. */
+/* C reference for the dispatched candidate-selection kernel; see
+ * decode.h. Identical to the reference's per-pixel loop with the
+ * row-constant bounds and phase tests already folded into the
+ * have_sample/have_penalty flags. */
+static void split3d_row_c(int16_t *out, const float *c1c, const float *c2c,
+                          const uint16_t *ref, const comp_split3d_cand_t *cand,
+                          const double *irescale, int w)
+{
+    static const double weights[3] = { 0.5, 1.0, 0.5 };
+
+    for (int x = 3; x < w - 3; x++) {
+        double best_penalty = 0.0;
+        float best_sample = 0.0f;
+        int best = -1;
+
+        for (int i = 0; i < 8; i++) {
+            const int ch = x + cand[i].off;
+            double penalty = 1000.0;
+            float sample = 0.0f;
+
+            if (cand[i].have_sample) {
+                sample = cand[i].c1[ch];
+                if (cand[i].have_penalty) {
+                    double ypen = 0.0, iqpen = 0.0;
+                    for (int o = -1; o <= 1; o++) {
+                        const double ref_c = c2c[x + o];
+                        const double cand_c = cand[i].c2[ch + o];
+                        ypen += fabs((ref[x + o] - ref_c)
+                                     - (cand[i].line[ch + o] - cand_c));
+                        iqpen += fabs(ref_c + cand_c) * weights[o + 1];
+                    }
+                    penalty = ypen / 3.0 / *irescale
+                            + (iqpen / 2.0 / *irescale) * 0.28
+                            + cand[i].bonus;
+                }
+            }
+
+            if (best < 0 || penalty < best_penalty) {
+                best = i;
+                best_penalty = penalty;
+                best_sample = sample;
+            }
+        }
+
+        const float tc = best < 4 ? c2c[x] : (c1c[x] - best_sample) / 2.0f;
+        out[x] = clamp_i16(lrintf(tc));
+    }
+}
+
+#if defined(__x86_64__)
+#define SPLIT3D_ROW_ASM(isa)                                                \
+    void comp_split3d_row_##isa(int16_t *out, const float *c1c,             \
+                                const float *c2c, const uint16_t *ref,      \
+                                const comp_split3d_cand_t *cand,            \
+                                const double *irescale, int w)
+SPLIT3D_ROW_ASM(sse4);
+SPLIT3D_ROW_ASM(avx2);
+SPLIT3D_ROW_ASM(avx512);
+
+/* the asm indexes the candidate table with these offsets */
+_Static_assert(sizeof(comp_split3d_cand_t) == 48, "split3d cand layout");
+_Static_assert(offsetof(comp_split3d_cand_t, off) == 24, "split3d cand layout");
+_Static_assert(offsetof(comp_split3d_cand_t, bonus) == 40, "split3d cand layout");
+#endif
+
+comp_split3d_row_fn comp_get_split3d_row_fn(unsigned cpu)
+{
+#if defined(__x86_64__)
+    if (cpu & COMP_CPU_AVX512)
+        return comp_split3d_row_avx512;
+    if (cpu & COMP_CPU_AVX2)
+        return comp_split3d_row_avx2;
+    if (cpu & COMP_CPU_SSE41)
+        return comp_split3d_row_sse4;
+#endif
+    (void)cpu;
+    return split3d_row_c;
+}
+
 static void ntsc_split3d(const comp_decode_t *d, int rows, int row_off,
                          const comp_frame_view_t *views, const int *view_frames,
                          const float *const c1[3], const float *const c2[3],
@@ -811,75 +891,54 @@ static void ntsc_split3d(const comp_decode_t *d, int rows, int row_off,
         const int cur_lp = ntsc_line_phase(view_frames[1], r + row_off);
         const float *c1c = c1[1] + r * w;
         const float *c2c = c2[1] + r * w;
+        const uint16_t *ref = views[1].data + r * views[1].stride;
         int16_t *out = chroma + r * w;
 
-        for (int x = 0; x < w; x++) {
-            if (x < 3 || x >= w - 3) {
-                out[x] = clamp_i16(lrintf(c2c[x]));
-                continue;
-            }
+        /* candidate table: buffer, line, sample offset, bonus; the
+         * first four are the same-frame (1D/2D) candidates */
+        struct { int k, cr, off; double bonus; } ct[8] = {
+            { 1, r, -2, 0.0 },
+            { 1, r, +2, 0.0 },
+            { 1, r - 2, 0, LINE_BONUS },
+            { 1, r + 2, 0, LINE_BONUS },
+            { 1, r - 1, 0, FIELD_BONUS },
+            { 1, r + 1, 0, FIELD_BONUS },
+            { 0, r, 0, FRAME_BONUS },
+            { 2, r, 0, FRAME_BONUS },
+        };
+        /* adjacent-field candidates come from this frame or the
+         * neighboring one, whichever gives the matching phase */
+        if (cur_lp == ntsc_line_phase(view_frames[1], r + row_off - 1))
+            ct[4].k = 0;
+        else
+            ct[5].k = 2;
 
-            const int want = (2 + 2 * cur_lp + x) % 4;
-
-            /* candidate table: buffer, line, sample, bonus; the first
-             * four are the same-frame (1D/2D) candidates */
-            struct { int k, cr, ch; double bonus; } cand[8] = {
-                { 1, r, x - 2, 0.0 },
-                { 1, r, x + 2, 0.0 },
-                { 1, r - 2, x, LINE_BONUS },
-                { 1, r + 2, x, LINE_BONUS },
-                { 1, r - 1, x, FIELD_BONUS },
-                { 1, r + 1, x, FIELD_BONUS },
-                { 0, r, x, FRAME_BONUS },
-                { 2, r, x, FRAME_BONUS },
-            };
-            /* adjacent-field candidates come from this frame or the
-             * neighbouring one, whichever gives the matching phase */
-            if (cur_lp == ntsc_line_phase(view_frames[1], r + row_off - 1))
-                cand[4].k = 0;
-            else
-                cand[5].k = 2;
-
-            double best_penalty = 0.0;
-            float best_sample = 0.0f;
-            int best = -1;
-
-            for (int i = 0; i < 8; i++) {
-                const int k = cand[i].k, cr = cand[i].cr, ch = cand[i].ch;
-                double penalty = 1000.0;
-                float sample = 0.0f;
-
-                if (cr >= 0 && cr < rows && ch >= 1 && ch < w - 1) {
-                    sample = c1[k][cr * w + ch];
-                    const int have = (2 * ntsc_line_phase(view_frames[k], cr + row_off) + ch) % 4;
-                    if (want == have) {
-                        const uint16_t *ref_line = views[1].data + r * views[1].stride;
-                        const uint16_t *cand_line = views[k].data + cr * views[k].stride;
-                        double ypen = 0.0, iqpen = 0.0;
-                        static const double weights[3] = { 0.5, 1.0, 0.5 };
-                        for (int o = -1; o <= 1; o++) {
-                            const double ref_c = c2c[x + o];
-                            const double cand_c = c2[k][cr * w + ch + o];
-                            ypen += fabs((ref_line[x + o] - ref_c)
-                                         - (cand_line[ch + o] - cand_c));
-                            iqpen += fabs(ref_c + cand_c) * weights[o + 1];
-                        }
-                        penalty = ypen / 3.0 / irescale
-                                + (iqpen / 2.0 / irescale) * 0.28
-                                + cand[i].bonus;
-                    }
-                }
-
-                if (best < 0 || penalty < best_penalty) {
-                    best = i;
-                    best_penalty = penalty;
-                    best_sample = sample;
-                }
-            }
-
-            const float tc = best < 4 ? c2c[x] : (c1c[x] - best_sample) / 2.0f;
-            out[x] = clamp_i16(lrintf(tc));
+        comp_split3d_cand_t cand[8];
+        for (int i = 0; i < 8; i++) {
+            const int k = ct[i].k, cr = ct[i].cr, off = ct[i].off;
+            const int inside = cr >= 0 && cr < rows;
+            const int scr = inside ? cr : r;
+            /* the reference's per-pixel phase test reduces to a row
+             * constant: want - have = 2 + 2*cur_lp - 2*lp_k - off
+             * (mod 4), the x parity cancelling */
+            const int lpk = ntsc_line_phase(view_frames[k], scr + row_off);
+            const int phase_ok =
+                (((2 + 2 * cur_lp - 2 * lpk - off) % 4) + 4) % 4 == 0;
+            cand[i].c1 = c1[k] + scr * w;
+            cand[i].c2 = c2[k] + scr * w;
+            cand[i].line = views[k].data + scr * views[k].stride;
+            cand[i].off = off;
+            cand[i].have_sample = inside;
+            cand[i].have_penalty = inside && phase_ok;
+            cand[i].bonus = ct[i].bonus;
         }
+
+        d->split3d_row(out, c1c, c2c, ref, cand, &irescale, w);
+
+        for (int x = 0; x < 3; x++)
+            out[x] = clamp_i16(lrintf(c2c[x]));
+        for (int x = w - 3; x < w; x++)
+            out[x] = clamp_i16(lrintf(c2c[x]));
     }
 }
 
