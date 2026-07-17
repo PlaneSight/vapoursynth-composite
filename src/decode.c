@@ -1110,6 +1110,46 @@ static void crude_decode_frame(const comp_decode_t *d, int frame, int rows,
     }
 }
 
+/* One row of the hybrid's motion routing: the per-sample metric is the
+ * largest same-phase frame difference within ±2 samples (edge-clamped),
+ * and where it stays under the margin the comb's chroma replaces the
+ * transform's. Split into branch-free passes — pairwise difference,
+ * fixed-bound sliding max with the borders peeled, and-mask select —
+ * so each loop autovectorizes. */
+static void hybrid_motion_row(const uint16_t *cur, const uint16_t *pr,
+                              const uint16_t *nx, int32_t margin,
+                              uint8_t *restrict mk, int16_t *restrict chroma,
+                              const int16_t *restrict chroma2, int w)
+{
+    int32_t pairmax[COMP_ACTIVE_WIDTH_NTSC];
+
+    for (int x = 0; x < w; x++) {
+        const int32_t a = abs((int)cur[x] - (int)pr[x]);
+        const int32_t b = abs((int)cur[x] - (int)nx[x]);
+        pairmax[x] = a > b ? a : b;
+    }
+    for (int x = 2; x < w - 2; x++) {
+        int32_t m = pairmax[x - 2];
+        m = pairmax[x - 1] > m ? pairmax[x - 1] : m;
+        m = pairmax[x]     > m ? pairmax[x]     : m;
+        m = pairmax[x + 1] > m ? pairmax[x + 1] : m;
+        m = pairmax[x + 2] > m ? pairmax[x + 2] : m;
+        mk[x] = m < margin;
+    }
+    for (int e = 0; e < 4; e++) {
+        const int x = e < 2 ? e : w - 4 + e;
+        const int lo = x < 2 ? 0 : x - 2;
+        const int hi = x >= w - 2 ? w - 1 : x + 2;
+        int32_t m = 0;
+        for (int o = lo; o <= hi; o++)
+            m = pairmax[o] > m ? pairmax[o] : m;
+        mk[x] = m < margin;
+    }
+    for (int x = 0; x < w; x++)
+        chroma[x] ^= (int16_t)(-(int16_t)(mk[x] != 0)
+                               & (chroma[x] ^ chroma2[x]));
+}
+
 /* Y-only Landweber refinement, anchored to the pre-encode original:
  * iterate the luma estimate so the crude decode of its recomposite
  * converges to the original degraded luma, i.e. deconvolve the crude
@@ -1284,26 +1324,10 @@ void comp_decode_frame(comp_decode_t *d, int frame, int nframes,
                 const uint16_t *n2 = views[look + 2].data;
                 const ptrdiff_t p2s = views[look - 2].stride;
                 const ptrdiff_t n2s = views[look + 2].stride;
-                for (int r = 0; r < rows; r++) {
-                    const uint16_t *cur = comp + r * comp_stride;
-                    const uint16_t *pr = p2 + r * p2s;
-                    const uint16_t *nx = n2 + r * n2s;
-                    uint8_t *mk = s->mask + r * w;
-                    for (int x = 0; x < w; x++) {
-                        int32_t motion = 0;
-                        const int lo = x < 2 ? -x : -2;
-                        const int hi = x >= w - 2 ? w - 1 - x : 2;
-                        for (int o = lo; o <= hi; o++) {
-                            const int32_t a = abs((int)cur[x + o] - (int)pr[x + o]);
-                            const int32_t b = abs((int)cur[x + o] - (int)nx[x + o]);
-                            motion = a > motion ? a : motion;
-                            motion = b > motion ? b : motion;
-                        }
-                        mk[x] = motion < margin;
-                        if (mk[x])
-                            s->chroma[r * w + x] = s->chroma2[r * w + x];
-                    }
-                }
+                for (int r = 0; r < rows; r++)
+                    hybrid_motion_row(comp + r * comp_stride, p2 + r * p2s,
+                                      n2 + r * n2s, margin, s->mask + r * w,
+                                      s->chroma + r * w, s->chroma2 + r * w, w);
             }
         } else if (d->dimensions == 2) {
             ntsc_comb1d(d, rows, comp, comp_stride, s->chroma_f);
