@@ -35,7 +35,7 @@ if host_machine.cpu_family() == 'x86_64'
         language: 'nasm',
     )
     core_sources += files('x86/cpu.asm', 'x86/pal_demod.asm', 'x86/fir_row.asm',
-                          'x86/split3d.asm')
+                          'x86/split3d.asm', 'x86/lut_gain.asm')
 endif
 
 core = static_library('composite_core',
@@ -88,7 +88,8 @@ checkasm_dep = dependency('checkasm', required: get_option('checkasm'), allow_fa
 if checkasm_dep.found()
     checkasm_exe = executable('checkasm',
         files('test/checkasm/main.c', 'test/checkasm/pal_demod.c',
-              'test/checkasm/fir_row.c', 'test/checkasm/split3d.c'),
+              'test/checkasm/fir_row.c', 'test/checkasm/split3d.c',
+              'test/checkasm/lut_gain.c'),
         dependencies: [checkasm_dep] + core_deps,
         include_directories: include_directories('src'),
         link_with: core,

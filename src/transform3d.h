@@ -37,11 +37,22 @@ struct comp_field_view_t {
     ptrdiff_t stride;
 };
 
+/* Dispatched per-bin trained-LUT gain row: for each of n bins, r[i] is
+ * the pair-symmetry ratio lo/hi of (m_in[i], m_ref[i]) (1 when hi is
+ * 0) and g[i] the linear interpolation of the 16-knot row lut[i] at
+ * r[i] * (COMP_LUT_K - 1). n may be rounded up to a multiple of 16;
+ * all arrays (and lut rows) must be sized for the rounded count. */
+typedef void (*comp_lut_gain_fn)(float *g, float *r, const float *m_in,
+                                 const float *m_ref,
+                                 const float (*lut)[COMP_LUT_K], int n);
+comp_lut_gain_fn comp_get_lut_gain_fn(unsigned cpu);
+
 typedef struct comp_transform3d_t comp_transform3d_t;
 
 struct comp_transform3d_t {
     fftwf_plan forward;
     fftwf_plan inverse;
+    comp_lut_gain_fn lut_gain;
     int standard;
     int level;
     int use_lut;

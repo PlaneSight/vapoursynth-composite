@@ -5,6 +5,7 @@
 void checkasm_test_pal_demod(void);
 void checkasm_test_fir_row(void);
 void checkasm_test_split3d(void);
+void checkasm_test_lut_gain(void);
 
 static const CheckasmCpuInfo cpu_flags[] = {
     { "SSE2", "sse2", COMP_CPU_SSE2 },
@@ -18,6 +19,7 @@ static const CheckasmTest tests[] = {
     { "pal_demod", checkasm_test_pal_demod },
     { "fir_row", checkasm_test_fir_row },
     { "split3d", checkasm_test_split3d },
+    { "lut_gain", checkasm_test_lut_gain },
     {0}
 };
 

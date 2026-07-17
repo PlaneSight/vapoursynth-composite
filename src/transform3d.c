@@ -35,6 +35,7 @@
 #include <stdlib.h>
 #include <string.h>
 
+#include "cpu.h"
 #include "osdep.h"
 #include "subcarrier.h"
 #include "transform3d.h"
@@ -75,6 +76,7 @@ int comp_transform3d_init(comp_transform3d_t *t, double threshold, int standard,
     t->level = !!level;
     t->use_lut = 0;
     t->evidence = (float)evidence;
+    t->lut_gain = comp_get_lut_gain_fn(comp_cpu_detect());
     const int ytile = standard == COMP_STD_PAL ? YTILE_PAL : YTILE;
     for (int i = 0; i < COMP_T3D_NTHRESH; i++)
         t->threshold_sq[i] = (float)(threshold * threshold);
@@ -144,6 +146,27 @@ static void lut_gain_row_c(float *g, float *r, const float *m_in,
     }
 }
 
+#if defined(__x86_64__)
+#define LUT_GAIN_ASM(isa)                                                   \
+    void comp_lut_gain_##isa(float *g, float *r, const float *m_in,         \
+                             const float *m_ref,                            \
+                             const float (*lut)[COMP_LUT_K], int n)
+LUT_GAIN_ASM(sse4);
+LUT_GAIN_ASM(avx2);
+#endif
+
+comp_lut_gain_fn comp_get_lut_gain_fn(unsigned cpu)
+{
+#if defined(__x86_64__)
+    if (cpu & COMP_CPU_AVX2)
+        return comp_lut_gain_avx2;
+    if (cpu & COMP_CPU_SSE41)
+        return comp_lut_gain_sse4;
+#endif
+    (void)cpu;
+    return lut_gain_row_c;
+}
+
 /* Trained-LUT filter, both standards, staged so the divide-and-
  * interpolate gain math runs over linear rows: per-bin magnitudes
  * first, one lut_gain_row pass, then the gain application and
@@ -181,7 +204,7 @@ static float apply_filter_lut(const comp_transform3d_t *t,
         }
     }
 
-    lut_gain_row_c(g, r, m_in, m_ref, t->lut, nbins);
+    t->lut_gain(g, r, m_in, m_ref, t->lut, nbins);
 
     /* LF-luma evidence scales the gains per bin (PAL option) */
     if (pal && t->evidence > 0.0f) {
