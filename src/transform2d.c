@@ -240,15 +240,23 @@ void comp_transform2d_field(const comp_transform2d_t *t,
             const int start_x = tile_x < 0 ? -tile_x : 0;
             const int end_x = width - tile_x < XTILE ? width - tile_x : XTILE;
 
-            /* windowed forward FFT; samples beyond the raster are black */
+            /* windowed forward FFT; samples beyond the raster are black.
+             * The edge tests are hoisted out of the sample loops so each
+             * loop is branch-free and autovectorizable. */
             for (int y = 0; y < YTILE; y++) {
                 const int row_valid = y >= start_y && y < end_y;
                 const uint16_t *b = row_valid ? comp + (tile_y + y) * comp_stride : NULL;
-                for (int x = 0; x < XTILE; x++) {
-                    const float v = (!row_valid || x < start_x || x >= end_x)
-                                    ? LEVEL_BLACK : (float)b[tile_x + x];
-                    real[y * XTILE + x] = v * t->window[y][x];
-                }
+                const float *win = t->window[y];
+                float *dst = real + y * XTILE;
+                const int x0 = row_valid ? start_x : XTILE;
+                const int x1 = row_valid ? end_x : XTILE;
+
+                for (int x = 0; x < x0; x++)
+                    dst[x] = LEVEL_BLACK * win[x];
+                for (int x = x0; x < x1; x++)
+                    dst[x] = (float)b[tile_x + x] * win[x];
+                for (int x = x1; x < XTILE; x++)
+                    dst[x] = LEVEL_BLACK * win[x];
             }
             fftwf_execute_dft_r2c(t->forward, real, cplx_in);
 

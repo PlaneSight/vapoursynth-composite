@@ -572,11 +572,18 @@ static void build_slab_ntsc(const comp_transform3d_t *t, comp_t3d_slab_t *s,
                     const uint16_t *b = usable
                         ? fv->data + (fl >> 1) * fv->stride : NULL;
                     float *dst = &real[(z * YTILE + y) * XTILE];
-                    for (int x = 0; x < XTILE; x++) {
-                        const float v = (!usable || x < start_x || x >= end_x)
-                                        ? LEVEL_BLACK : (float)b[tile_x + x];
-                        dst[x] = v * t->window[z][y][x];
-                    }
+                    const float *win = t->window[z][y];
+                    /* edge tests hoisted so the sample loops are
+                     * branch-free and autovectorizable */
+                    const int x0 = usable ? start_x : XTILE;
+                    const int x1 = usable ? end_x : XTILE;
+
+                    for (int x = 0; x < x0; x++)
+                        dst[x] = LEVEL_BLACK * win[x];
+                    for (int x = x0; x < x1; x++)
+                        dst[x] = (float)b[tile_x + x] * win[x];
+                    for (int x = x1; x < XTILE; x++)
+                        dst[x] = LEVEL_BLACK * win[x];
                 }
             }
             fftwf_execute_dft_r2c(t->forward, real, cplx_in);
@@ -646,11 +653,18 @@ static void build_slab_pal(const comp_transform3d_t *t, comp_t3d_slab_t *s,
                     const int usable = fv && r >= 0 && r < field_rows;
                     const uint16_t *b = usable ? fv->data + r * fv->stride : NULL;
                     float *dst = &real[(z * YTILE_PAL + y) * XTILE];
-                    for (int x = 0; x < XTILE; x++) {
-                        const float v = (!usable || x < start_x || x >= end_x)
-                                        ? LEVEL_BLACK : (float)b[tile_x + x];
-                        dst[x] = v * t->window[z][y][x];
-                    }
+                    const float *win = t->window[z][y];
+                    /* edge tests hoisted so the sample loops are
+                     * branch-free and autovectorizable */
+                    const int x0 = usable ? start_x : XTILE;
+                    const int x1 = usable ? end_x : XTILE;
+
+                    for (int x = 0; x < x0; x++)
+                        dst[x] = LEVEL_BLACK * win[x];
+                    for (int x = x0; x < x1; x++)
+                        dst[x] = (float)b[tile_x + x] * win[x];
+                    for (int x = x1; x < XTILE; x++)
+                        dst[x] = LEVEL_BLACK * win[x];
                 }
             }
             fftwf_execute_dft_r2c(t->forward, real, cplx_in);
