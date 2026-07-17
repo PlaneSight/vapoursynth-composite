@@ -6,13 +6,20 @@ project('composite', 'c',
     version: '1',
 )
 
+cc = meson.get_compiler('c')
+
+# libm calls stay bit-exact without errno; keeping them errno-free lets
+# the vectorizers treat lrintf and friends as pure and vectorize the
+# quantization loops
+add_project_arguments(cc.get_supported_arguments('-fno-math-errno'), language: 'c')
+
 py = import('python').find_installation(pure: false)
 
 incdir = include_directories(
     run_command(py, '-c', 'import vapoursynth as vs; print(vs.get_include())', check: true).stdout().strip(),
 )
 
-m_dep = meson.get_compiler('c').find_library('m', required: false)
+m_dep = cc.find_library('m', required: false)
 fftw3f_dep = dependency('fftw3f')
 threads_dep = dependency('threads')
 core_deps = [m_dep, fftw3f_dep, threads_dep]
