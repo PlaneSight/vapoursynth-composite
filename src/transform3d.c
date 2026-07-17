@@ -145,8 +145,8 @@ void comp_t3d_rowpair(int standard, int32_t (*rows)[2])
                               : ((ZTILE / 2) + ZTILE - z) % ZTILE;
         for (int y = 0; y < yt; y++, i++) {
             const int y_ref = ((yt / 2) + yt - y) % yt;
-            rows[i][0] = (z * yt + y) * XC * 2;
-            rows[i][1] = (z_ref * yt + y_ref) * XC * 2;
+            rows[i][0] = (z * yt + y) * XC * 2 + (XTILE / 8) * 2;
+            rows[i][1] = (z_ref * yt + y_ref) * XC * 2 + (XTILE / 4) * 2;
         }
     }
 }
@@ -189,8 +189,8 @@ static void t3d_mag_c(float *m_in, float *m_ref, const float *in,
                       const int32_t (*rows)[2], int nrows)
 {
     for (int i = 0; i < nrows; i++) {
-        const float *a = in + rows[i][0] + (XTILE / 8) * 2;
-        const float *b = in + rows[i][1] + (XTILE / 4) * 2;
+        const float *a = in + rows[i][0];
+        const float *b = in + rows[i][1];
         m_in[3 * i + 0] = a[0] * a[0] + a[1] * a[1];
         m_in[3 * i + 1] = a[2] * a[2] + a[3] * a[3];
         m_in[3 * i + 2] = a[4] * a[4] + a[5] * a[5];
@@ -207,10 +207,10 @@ static void t3d_apply_c(float *out, const float *in, const float *g,
                         const int32_t (*rows)[2], int nrows)
 {
     for (int i = 0; i < nrows; i++) {
-        const float *a = in + rows[i][0] + (XTILE / 8) * 2;
-        const float *b = in + rows[i][1] + (XTILE / 4) * 2;
-        float *oa = out + rows[i][0] + (XTILE / 8) * 2;
-        float *ob = out + rows[i][1] + (XTILE / 4) * 2;
+        const float *a = in + rows[i][0];
+        const float *b = in + rows[i][1];
+        float *oa = out + rows[i][0];
+        float *ob = out + rows[i][1];
         const float g0 = g[3 * i + 0];
         const float g1 = g[3 * i + 1];
         const float g2 = g[3 * i + 2];

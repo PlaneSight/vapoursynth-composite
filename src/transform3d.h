@@ -54,8 +54,10 @@ typedef void (*comp_lut_gain_fn)(float *g, float *r, const float *m_in,
                                  const float (*lut)[COMP_LUT_K], int n);
 comp_lut_gain_fn comp_get_lut_gain_fn(unsigned cpu);
 
-/* fill rows[i] = { own, ref } float offsets of bin row i's own and
- * reflected (z, y) tile rows; nrows is ZTILE * ytile of the standard */
+/* Fill rows[i] = { own, ref } float offsets of bin row i's x bands:
+ * own points at the x = XTILE/8 bin of the row, ref at the x = XTILE/4
+ * bin of the reflected row. The kernels take all addressing from the
+ * table, so a different tile layout is just a different table. */
 void comp_t3d_rowpair(int standard, int32_t (*rows)[2]);
 
 /* Dispatched row kernels over the bin-row table. mag fills the linear

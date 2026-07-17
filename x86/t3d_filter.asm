@@ -7,11 +7,11 @@
 SECTION .text
 
 ; Both kernels walk the bin-row table: rows[i] = { own, ref } float
-; offsets of the row's own and reflected tile rows. The x band is three
-; complex bins starting at XTILE/8 = 2 (float 4 of the row); the
-; reflected band is three bins starting at XTILE/4 = 4, read and
-; written reversed. Rows are XCOMPLEX = 9 complex (72 bytes), so the
-; 16-byte tails of the band loads stay inside the row.
+; offsets of the row's x bands — own at the x = XTILE/8 bin, ref at
+; the reflected row's x = XTILE/4 bin. All addressing comes from the
+; table, so tile layout is the table builder's business; every load
+; and store (including the mag ref load starting one bin before the
+; ref band) stays inside the band's row for both layouts in use.
 
 ; Squared magnitudes of 4 complex values from two 16-byte loads. The
 ; fma3 form single-rounds the im^2 accumulation -- one rounding fewer
@@ -38,14 +38,14 @@ SECTION .text
 %macro T3D_MAG 0
 cglobal t3d_mag, 5, 8, 6, mi, mr, in, rows, n, i0, i1
 .row:
-    mov          i0d, [rowsq]
-    mov          i1d, [rowsq + 4]
-    movu         m0, [inq + i0q*4 + 16]  ; x = 2, 3
-    movu         m1, [inq + i0q*4 + 32]  ; x = 4, 5
+    mov          i0d, [rowsq]            ; own band: the x = XTILE/8 bin
+    mov          i1d, [rowsq + 4]        ; ref band: the x = XTILE/4 bin
+    movu         m0, [inq + i0q*4]       ; x = 2, 3
+    movu         m1, [inq + i0q*4 + 16]  ; x = 4, 5
     MAG4         m2, m0, m1
     movu         [miq], m2               ; m2 m3 m4 | m5 slack
-    movu         m0, [inq + i1q*4 + 24]  ; x = 3, 4
-    movu         m1, [inq + i1q*4 + 40]  ; x = 5, 6
+    movu         m0, [inq + i1q*4 - 8]   ; x = 3, 4
+    movu         m1, [inq + i1q*4 + 8]   ; x = 5, 6
     MAG4         m2, m0, m1
     shufps       m2, m2, 0x1B            ; reversed reflection
     movu         [mrq], m2               ; m6 m5 m4 | m3 slack
@@ -69,19 +69,19 @@ cglobal t3d_apply, 5, 8, 6, out, in, g, rows, n, i0, i1
     movu         m2, [gq]                ; g0 g1 g2 | pad
     unpcklps     m3, m2, m2              ; g0 g0 g1 g1
     unpckhps     m4, m2, m2              ; g2 g2 . .
-    movu         m0, [inq + i0q*4 + 16]
-    movsd        m1, [inq + i0q*4 + 32]
+    movu         m0, [inq + i0q*4]
+    movsd        m1, [inq + i0q*4 + 16]
     mulps        m0, m3
     mulps        m1, m4
-    movu         [outq + i0q*4 + 16], m0
-    movsd        [outq + i0q*4 + 32], m1
+    movu         [outq + i0q*4], m0
+    movsd        [outq + i0q*4 + 16], m1
     shufps       m5, m4, m3, 0xE4        ; g2 g2 g1 g1
-    movu         m0, [inq + i1q*4 + 32]
-    movsd        m1, [inq + i1q*4 + 48]
+    movu         m0, [inq + i1q*4]
+    movsd        m1, [inq + i1q*4 + 16]
     mulps        m0, m5
     mulps        m1, m3                  ; low lanes g0 g0
-    movu         [outq + i1q*4 + 32], m0
-    movsd        [outq + i1q*4 + 48], m1
+    movu         [outq + i1q*4], m0
+    movsd        [outq + i1q*4 + 16], m1
     add          rowsq, 8
     add          gq, 12
     dec          nd
