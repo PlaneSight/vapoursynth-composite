@@ -17,8 +17,21 @@ fftw3f_dep = dependency('fftw3f')
 threads_dep = dependency('threads')
 core_deps = [m_dep, fftw3f_dep, threads_dep]
 
+core_sources = files('src/subcarrier.c', 'src/encode.c', 'src/transform2d.c',
+                     'src/transform3d.c', 'src/decode.c', 'src/cpu.c')
+
+if host_machine.cpu_family() == 'x86_64'
+    add_languages('nasm', native: false)
+    add_project_arguments(
+        '-DARCH_X86_64=1', '-DPIC', '-Dprivate_prefix=comp',
+        '-I' + meson.current_source_dir() / 'x86/',
+        language: 'nasm',
+    )
+    core_sources += files('x86/cpu.asm', 'x86/pal_demod.asm')
+endif
+
 core = static_library('composite_core',
-    files('src/subcarrier.c', 'src/encode.c', 'src/transform2d.c', 'src/transform3d.c', 'src/decode.c'),
+    core_sources,
     dependencies: core_deps,
     gnu_symbol_visibility: 'hidden',
     pic: true,
@@ -62,3 +75,14 @@ test('decode', executable('test_decode',
     include_directories: include_directories('src'),
     link_with: core,
 ))
+
+checkasm_dep = dependency('checkasm', required: get_option('checkasm'), allow_fallback: true)
+if checkasm_dep.found()
+    checkasm_exe = executable('checkasm',
+        files('test/checkasm/main.c', 'test/checkasm/pal_demod.c'),
+        dependencies: [checkasm_dep] + core_deps,
+        include_directories: include_directories('src'),
+        link_with: core,
+    )
+    test('checkasm', checkasm_exe)
+endif

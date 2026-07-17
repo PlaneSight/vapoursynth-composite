@@ -21,6 +21,7 @@
 #include <stdlib.h>
 #include <string.h>
 
+#include "cpu.h"
 #include "decode.h"
 #include "encode.h"
 
@@ -166,6 +167,7 @@ int comp_decode_init(comp_decode_t *d, int standard, double threshold,
     d->use_transform = use_transform;
     d->eq = eq;
     d->cti = !!cti;
+    d->pal_demod = comp_get_pal_demod_fn(comp_cpu_detect());
     if (eq == 2)
         design_narrow(d, standard == COMP_STD_PAL ? 4.0 * 4433618.75
                                                   : 4.0 * 3579545.0);
@@ -497,6 +499,79 @@ static inline int16_t clamp_i16(long v)
  * pointers are frame planes, written at rows 2*fieldline + field.
  * conf (a field view at chroma_stride, may be NULL) is the transform's
  * chroma-confidence map, which scales the eq=2 boost per sample. */
+/* C reference for the dispatched demod kernel; see decode.h */
+static void pal_demod_row_c(int32_t *u, int32_t *v,
+                            const int32_t *m, const int32_t *n,
+                            ptrdiff_t stride, const int32_t *cf,
+                            int w, int32_t bp, int32_t bq, int32_t vswitch)
+{
+    for (int x = 0; x < w; x++) {
+        int64_t pu = 0, qu = 0, pv = 0, qv = 0;
+
+        for (int b = 0; b <= FS; b++) {
+            const int l = FS + x - b;
+            const int r = FS + x + b;
+            const int32_t *c = cf + 4 * b;
+
+            const int32_t m0 = m[r] + m[l];
+            const int32_t n0 = n[r] + n[l];
+            const int32_t m1 = m[1 * stride + r] + m[1 * stride + l];
+            const int32_t n1 = n[1 * stride + r] + n[1 * stride + l];
+            const int32_t m2 = m[2 * stride + r] + m[2 * stride + l];
+            const int32_t n2 = n[2 * stride + r] + n[2 * stride + l];
+            const int32_t m3 = m[3 * stride + r] + m[3 * stride + l];
+            const int32_t n3 = n[3 * stride + r] + n[3 * stride + l];
+
+            pu += (int64_t)m0 * c[0] + (int64_t)m1 * c[1]
+                + (int64_t)n2 * c[2] + (int64_t)n3 * c[3];
+            qu += (int64_t)n0 * c[0] + (int64_t)n1 * c[1]
+                - (int64_t)m2 * c[2] - (int64_t)m3 * c[3];
+            pv += (int64_t)m0 * c[0] + (int64_t)m1 * c[1]
+                - (int64_t)n2 * c[2] - (int64_t)n3 * c[3];
+            qv += (int64_t)n0 * c[0] + (int64_t)n1 * c[1]
+                + (int64_t)m2 * c[2] + (int64_t)m3 * c[3];
+        }
+
+        /* Q16 filter -> Q0 products (at half chroma amplitude) */
+        const int32_t pu0 = (int32_t)((pu + 32768) >> 16);
+        const int32_t qu0 = (int32_t)((qu + 32768) >> 16);
+        const int32_t pv0 = (int32_t)((pv + 32768) >> 16);
+        const int32_t qv0 = (int32_t)((qv + 32768) >> 16);
+
+        /* rotate onto the U/V axes and double (the filter recovers
+         * chroma at half amplitude); bp/bq are Q15, so >> 14 */
+        u[x] = (int32_t)(-((int64_t)pu0 * bp + (int64_t)qu0 * bq + 8192) >> 14);
+        v[x] = vswitch *
+            (int32_t)(-((int64_t)qv0 * bp - (int64_t)pv0 * bq + 8192) >> 14);
+    }
+}
+
+#if defined(__x86_64__)
+#define PAL_DEMOD_ROW_ASM(isa)                                              \
+    void comp_pal_demod_row_##isa(int32_t *u, int32_t *v,                   \
+                                  const int32_t *m, const int32_t *n,       \
+                                  ptrdiff_t stride, const int32_t *cf,      \
+                                  int w, int32_t bp, int32_t bq,            \
+                                  int32_t vswitch)
+PAL_DEMOD_ROW_ASM(sse4);
+PAL_DEMOD_ROW_ASM(avx2);
+PAL_DEMOD_ROW_ASM(avx512);
+#endif
+
+comp_pal_demod_fn comp_get_pal_demod_fn(unsigned cpu)
+{
+#if defined(__x86_64__)
+    if (cpu & COMP_CPU_AVX512)
+        return comp_pal_demod_row_avx512;
+    if (cpu & COMP_CPU_AVX2)
+        return comp_pal_demod_row_avx2;
+    if (cpu & COMP_CPU_SSE41)
+        return comp_pal_demod_row_sse4;
+#endif
+    (void)cpu;
+    return pal_demod_row_c;
+}
+
 static void pal_decode_field(const comp_decode_t *d, int frame, int field,
                              const uint16_t *comp, ptrdiff_t comp_stride,
                              const int16_t *chroma, ptrdiff_t chroma_stride,
@@ -557,42 +632,11 @@ static void pal_decode_field(const comp_decode_t *d, int frame, int field,
         uint16_t *outv = dstv + row * vstride;
         int32_t u_row[WIDTH], v_row[WIDTH], u_eq[WIDTH], v_eq[WIDTH];
 
+        d->pal_demod(u_row, v_row, &m[0][0], &n[0][0], WIDTH + 2 * FS,
+                     &d->cfilt_q16[0][0], w, bp, bq, sc.vswitch);
+
+        /* luma is the composite minus the separated chroma */
         for (int x = 0; x < w; x++) {
-            int64_t pu = 0, qu = 0, pv = 0, qv = 0;
-
-            for (int b = 0; b <= FS; b++) {
-                const int l = FS + x - b;
-                const int r = FS + x + b;
-                const int32_t *cf = d->cfilt_q16[b];
-
-                const int32_t m0 = m[0][r] + m[0][l], n0 = n[0][r] + n[0][l];
-                const int32_t m1 = m[1][r] + m[1][l], n1 = n[1][r] + n[1][l];
-                const int32_t m2 = m[2][r] + m[2][l], n2 = n[2][r] + n[2][l];
-                const int32_t m3 = m[3][r] + m[3][l], n3 = n[3][r] + n[3][l];
-
-                pu += (int64_t)m0 * cf[0] + (int64_t)m1 * cf[1]
-                    + (int64_t)n2 * cf[2] + (int64_t)n3 * cf[3];
-                qu += (int64_t)n0 * cf[0] + (int64_t)n1 * cf[1]
-                    - (int64_t)m2 * cf[2] - (int64_t)m3 * cf[3];
-                pv += (int64_t)m0 * cf[0] + (int64_t)m1 * cf[1]
-                    - (int64_t)n2 * cf[2] - (int64_t)n3 * cf[3];
-                qv += (int64_t)n0 * cf[0] + (int64_t)n1 * cf[1]
-                    + (int64_t)m2 * cf[2] + (int64_t)m3 * cf[3];
-            }
-
-            /* Q16 filter -> Q0 products (at half chroma amplitude) */
-            const int32_t pu0 = (int32_t)((pu + 32768) >> 16);
-            const int32_t qu0 = (int32_t)((qu + 32768) >> 16);
-            const int32_t pv0 = (int32_t)((pv + 32768) >> 16);
-            const int32_t qv0 = (int32_t)((qv + 32768) >> 16);
-
-            /* rotate onto the U/V axes and double (the filter recovers
-             * chroma at half amplitude); bp/bq are Q15, so >> 14 */
-            u_row[x] = (int32_t)(-((int64_t)pu0 * bp + (int64_t)qu0 * bq + 8192) >> 14);
-            v_row[x] = sc.vswitch *
-                (int32_t)(-((int64_t)qv0 * bp - (int64_t)pv0 * bq + 8192) >> 14);
-
-            /* luma is the composite minus the separated chroma */
             const int32_t yl = (int32_t)comp_row[x] - in0[x];
             outy[x] = clamp_u16(4096 + rdiv((int64_t)(yl - d->level_black) * d->luma_num, d->luma_den));
         }

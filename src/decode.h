@@ -14,6 +14,22 @@
 #define COMP_EQ_TAPS 31
 #define COMP_NARROW_TAPS 13
 
+/* Filter the PAL quadrature product rows and rotate onto the U/V axes
+ * (the hot loop of the PALcolour-style demodulator). m and n hold four
+ * planes of `stride` int32 elements each — the vertical-tap groups of
+ * the chroma-times-carrier products — with x = 0 at element
+ * COMP_DECODE_FILTER_SIZE and that many zeros of padding on each side.
+ * cf is the 2D chroma filter, (FILTER_SIZE+1) x 4 Q16 values. bp/bq is
+ * the line's burst-phase unit vector (Q15), vswitch the PAL switch
+ * sign. Writes w samples of U and V; w must be a multiple of 8. */
+typedef void (*comp_pal_demod_fn)(int32_t *u, int32_t *v,
+                                  const int32_t *m, const int32_t *n,
+                                  ptrdiff_t stride, const int32_t *cf,
+                                  int w, int32_t bp, int32_t bq,
+                                  int32_t vswitch);
+
+comp_pal_demod_fn comp_get_pal_demod_fn(unsigned cpu);
+
 typedef struct comp_decode_scratch_t comp_decode_scratch_t;
 
 struct comp_decode_scratch_t {
@@ -54,6 +70,7 @@ struct comp_decode_t {
     int32_t narrow_q15[COMP_NARROW_TAPS];  /* eq=2: sub-nominal chroma LP */
     int16_t sin_q15[COMP_SC_DEN_PAL];
     int32_t cfilt_q16[COMP_DECODE_FILTER_SIZE + 1][4];
+    comp_pal_demod_fn pal_demod;
     comp_transform2d_t transform;
     comp_transform3d_t transform3;
     comp_t3d_cache_t t3cache;    /* 3D transform slab cache */

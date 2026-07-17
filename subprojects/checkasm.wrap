@@ -1,0 +1,7 @@
+[wrap-git]
+url = https://github.com/haasn/checkasm.git
+revision = 354f3d3e8d97c8fec155fd4b57fa1ba8043a0481
+depth = 1
+
+[provide]
+checkasm = checkasm_dep
