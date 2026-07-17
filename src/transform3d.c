@@ -18,8 +18,15 @@
  * direction, which splits the carriers here).
  *
  * NTSC keeps the reference's frame-line tiles (16x32x8) with the other
- * field's rows black, so the FFT sees the interlaced lattice directly;
- * its carrier lattice under displacement has not been derived.
+ * field's rows black, so the FFT sees the interlaced lattice directly.
+ * The displaced variant was derived and measured for NTSC too (single
+ * carrier at temporal Nyquist, reflection ((-z)%8, (-y)%16, 8-x)) and
+ * rejected: real-footage chroma flicker was consistently worse, even
+ * with retrained tables. NTSC's single shared carrier makes the pair
+ * symmetry approximate, and the black-filled lattice's alias-pair
+ * redundancy averages that test — a variance reduction the dense
+ * displaced lattice gives up; PAL's two exact carriers had nothing to
+ * lose.
  */
 
 #include <limits.h>
