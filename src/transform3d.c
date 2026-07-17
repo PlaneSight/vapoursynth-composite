@@ -123,16 +123,137 @@ void comp_transform3d_free(comp_transform3d_t *t)
     t->inverse = NULL;
 }
 
-/* gain from a per-bin LUT row: linear interpolation over the
- * pair-symmetry ratio, knots uniform on [0, 1] */
-static inline float lut_gain(const float *row, float lo, float hi)
+/* Per-bin trained-LUT gain row: for each bin, the pair-symmetry ratio
+ * r = lo/hi (1 when hi is 0) and the linear interpolation of that
+ * bin's LUT row at r * (COMP_LUT_K - 1), knots uniform on [0, 1].
+ * Arrays are padded so n may be rounded up to 16. */
+static void lut_gain_row_c(float *g, float *r, const float *m_in,
+                           const float *m_ref,
+                           const float (*lut)[COMP_LUT_K], int n)
 {
-    const float r = hi > 0.0f ? lo / hi : 1.0f;
-    const float pos = r * (COMP_LUT_K - 1);
-    int k = (int)pos;
-    if (k > COMP_LUT_K - 2)
-        k = COMP_LUT_K - 2;
-    return row[k] + (row[k + 1] - row[k]) * (pos - k);
+    for (int i = 0; i < n; i++) {
+        const float lo = m_in[i] < m_ref[i] ? m_in[i] : m_ref[i];
+        const float hi = m_in[i] < m_ref[i] ? m_ref[i] : m_in[i];
+        const float ri = hi > 0.0f ? lo / hi : 1.0f;
+        const float pos = ri * (COMP_LUT_K - 1);
+        int k = (int)pos;
+        if (k > COMP_LUT_K - 2)
+            k = COMP_LUT_K - 2;
+        r[i] = ri;
+        g[i] = lut[i][k] + (lut[i][k + 1] - lut[i][k]) * (pos - k);
+    }
+}
+
+/* Trained-LUT filter, both standards, staged so the divide-and-
+ * interpolate gain math runs over linear rows: per-bin magnitudes
+ * first, one lut_gain_row pass, then the gain application and
+ * confidence sums. The application keeps the exact scalar bin order:
+ * in the x = XTILE/4 column both members of a pair are themselves
+ * iterated bins carrying different LUT rows, so each such pair is
+ * written twice and the later visit must win; the confidence sums are
+ * float accumulation, where order changes the result. */
+static float apply_filter_lut(const comp_transform3d_t *t,
+                              const fftwf_complex *in, fftwf_complex *out)
+{
+    const int pal = t->standard == COMP_STD_PAL;
+    const int yt = pal ? YTILE_PAL : YTILE;
+    const int nbins = pal ? COMP_T3D_NTHRESH_PAL : COMP_T3D_NTHRESH;
+    float m_in[COMP_T3D_NTHRESH], m_ref[COMP_T3D_NTHRESH];
+    float g[COMP_T3D_NTHRESH], r[COMP_T3D_NTHRESH];
+    float conf_num = 0.0f, conf_den = 0.0f;
+
+    memset(out, 0, sizeof(fftwf_complex) * ZTILE * yt * XC);
+
+    int bin = 0;
+    for (int z = 0; z < ZTILE; z++) {
+        const int z_ref = pal ? (ZTILE - z) % ZTILE
+                              : ((ZTILE / 2) + ZTILE - z) % ZTILE;
+        for (int y = 0; y < yt; y++) {
+            const int y_ref = ((yt / 2) + yt - y) % yt;
+            const fftwf_complex *bi = in + (z * yt + y) * XC;
+            const fftwf_complex *bi_ref = in + (z_ref * yt + y_ref) * XC;
+            for (int x = XTILE / 8; x <= XTILE / 4; x++, bin++) {
+                const int x_ref = (XTILE / 2) - x;
+                m_in[bin] = bi[x][0] * bi[x][0] + bi[x][1] * bi[x][1];
+                m_ref[bin] = bi_ref[x_ref][0] * bi_ref[x_ref][0]
+                           + bi_ref[x_ref][1] * bi_ref[x_ref][1];
+            }
+        }
+    }
+
+    lut_gain_row_c(g, r, m_in, m_ref, t->lut, nbins);
+
+    /* LF-luma evidence scales the gains per bin (PAL option) */
+    if (pal && t->evidence > 0.0f) {
+        static const int cy[2] = { 12, 4 };
+        bin = 0;
+        for (int z = 0; z < ZTILE; z++) {
+            for (int y = 0; y < yt; y++) {
+                for (int x = XTILE / 8; x <= XTILE / 4; x++, bin++) {
+                    float e = 0.0f;
+                    for (int c = 0; c < 2; c++) {
+                        const fftwf_complex *lf =
+                            in + (((4 - z + ZTILE) % ZTILE) * yt
+                                  + (cy[c] - y + yt) % yt) * XC
+                               + (XTILE / 4) - x;
+                        const float ec = (*lf)[0] * (*lf)[0] + (*lf)[1] * (*lf)[1];
+                        e = ec > e ? ec : e;
+                    }
+                    const float hi = m_in[bin] > m_ref[bin] ? m_in[bin]
+                                                            : m_ref[bin];
+                    const float den = e + t->evidence * hi;
+                    if (den > 0.0f)
+                        g[bin] *= e / den;
+                }
+            }
+        }
+    }
+
+    bin = 0;
+    for (int z = 0; z < ZTILE; z++) {
+        const int z_ref = pal ? (ZTILE - z) % ZTILE
+                              : ((ZTILE / 2) + ZTILE - z) % ZTILE;
+        for (int y = 0; y < yt; y++) {
+            const int y_ref = ((yt / 2) + yt - y) % yt;
+            const fftwf_complex *bi = in + (z * yt + y) * XC;
+            const fftwf_complex *bi_ref = in + (z_ref * yt + y_ref) * XC;
+            fftwf_complex *bo = out + (z * yt + y) * XC;
+            fftwf_complex *bo_ref = out + (z_ref * yt + y_ref) * XC;
+            for (int x = XTILE / 8; x <= XTILE / 4; x++, bin++) {
+                const int x_ref = (XTILE / 2) - x;
+
+                if (x == x_ref) {
+                    /* self-column specials, as in the pair-test modes */
+                    if (pal ? (y == y_ref && z == z_ref)
+                            : ((y == YTILE / 4 && z == ZTILE / 4)
+                               || (y == 3 * YTILE / 4 && z == 3 * ZTILE / 4))) {
+                        bo[x][0] = bi[x][0];
+                        bo[x][1] = bi[x][1];
+                        conf_num += m_in[bin];
+                        conf_den += m_in[bin];
+                        continue;
+                    }
+                    if (!pal
+                        && (((y == 0 || y == YTILE / 2)
+                             && (z == 0 || z == ZTILE / 2))
+                            || (y == YTILE / 4 && z == 3 * ZTILE / 4)
+                            || (y == 3 * YTILE / 4 && z == ZTILE / 4)))
+                        continue;
+                }
+
+                const float gb = g[bin];
+                bo[x][0] = bi[x][0] * gb;
+                bo[x][1] = bi[x][1] * gb;
+                bo_ref[x_ref][0] = bi_ref[x_ref][0] * gb;
+                bo_ref[x_ref][1] = bi_ref[x_ref][1] * gb;
+                const float e = gb * gb * (m_in[bin] + m_ref[bin]);
+                conf_num += e * r[bin];
+                conf_den += e;
+            }
+        }
+    }
+
+    return conf_den > 0.0f ? conf_num / conf_den : 0.0f;
 }
 
 
@@ -197,19 +318,6 @@ static float apply_filter_pal(const comp_transform3d_t *t,
                     const float den = e + t->evidence * hi;
                     if (den > 0.0f)
                         g_e = e / den;
-                }
-
-                if (t->use_lut) {
-                    const int bin = (int)(tsq - t->threshold_sq) - 1;
-                    const float g = lut_gain(t->lut[bin], lo, hi) * g_e;
-                    bo[x][0] = bi[x][0] * g;
-                    bo[x][1] = bi[x][1] * g;
-                    bo_ref[x_ref][0] = bi_ref[x_ref][0] * g;
-                    bo_ref[x_ref][1] = bi_ref[x_ref][1] * g;
-                    const float e = g * g * (m_in_sq + m_ref_sq);
-                    conf_num += e * r;
-                    conf_den += e;
-                    continue;
                 }
 
                 if (t->level) {
@@ -345,19 +453,6 @@ static float apply_filter_ntsc(const comp_transform3d_t *t,
                 const float lo = m_in < m_ref ? m_in : m_ref;
                 const float m_max = m_in > m_ref ? m_in : m_ref;
                 const float r = m_max > 0.0f ? lo / m_max : 1.0f;
-
-                if (t->use_lut) {
-                    const int bin = (int)(tsq - t->threshold_sq) - 1;
-                    const float g = lut_gain(t->lut[bin], lo, m_max);
-                    bo[x][0] = bi[x][0] * g;
-                    bo[x][1] = bi[x][1] * g;
-                    bo_ref[x_ref][0] = bi_ref[x_ref][0] * g;
-                    bo_ref[x_ref][1] = bi_ref[x_ref][1] * g;
-                    const float e = g * g * (m_in + m_ref);
-                    conf_num += e * r;
-                    conf_den += e;
-                    continue;
-                }
 
                 const float l1 = (*lr1)[0] * (*lr1)[0] + (*lr1)[1] * (*lr1)[1];
                 const float l2 = (*lr2)[0] * (*lr2)[0] + (*lr2)[1] * (*lr2)[1];
@@ -588,7 +683,8 @@ static void build_slab_ntsc(const comp_transform3d_t *t, comp_t3d_slab_t *s,
             }
             fftwf_execute_dft_r2c(t->forward, real, cplx_in);
 
-            const float w = apply_filter_ntsc(t, cplx_in, cplx_out);
+            const float w = t->use_lut ? apply_filter_lut(t, cplx_in, cplx_out)
+                                       : apply_filter_ntsc(t, cplx_in, cplx_out);
 
             fftwf_execute_dft_c2r(t->inverse, cplx_out, real);
 
@@ -669,7 +765,8 @@ static void build_slab_pal(const comp_transform3d_t *t, comp_t3d_slab_t *s,
             }
             fftwf_execute_dft_r2c(t->forward, real, cplx_in);
 
-            const float w = apply_filter_pal(t, cplx_in, cplx_out);
+            const float w = t->use_lut ? apply_filter_lut(t, cplx_in, cplx_out)
+                                       : apply_filter_pal(t, cplx_in, cplx_out);
 
             fftwf_execute_dft_c2r(t->inverse, cplx_out, real);
 
