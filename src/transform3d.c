@@ -79,6 +79,8 @@ int comp_transform3d_init(comp_transform3d_t *t, double threshold, int standard,
     t->use_lut = 0;
     t->evidence = (float)evidence;
     t->lut_gain = comp_get_lut_gain_fn(comp_cpu_detect());
+    t->t3d_mag = comp_get_t3d_mag_fn(comp_cpu_detect());
+    t->t3d_apply = comp_get_t3d_apply_fn(comp_cpu_detect());
     t3d_build_tables(t);
     const int ytile = standard == COMP_STD_PAL ? YTILE_PAL : YTILE;
     for (int i = 0; i < COMP_T3D_NTHRESH; i++)
@@ -132,21 +134,36 @@ void comp_transform3d_free(comp_transform3d_t *t)
  * offsets of its own and reflected tile rows, plus the x = XTILE/4
  * self-column specials (the bins that are their own reflection, kept
  * or discarded by the carrier tables of the pair-test filters). */
+void comp_t3d_rowpair(int standard, int32_t (*rows)[2])
+{
+    const int pal = standard == COMP_STD_PAL;
+    const int yt = pal ? YTILE_PAL : YTILE;
+    int i = 0;
+
+    for (int z = 0; z < ZTILE; z++) {
+        const int z_ref = pal ? (ZTILE - z) % ZTILE
+                              : ((ZTILE / 2) + ZTILE - z) % ZTILE;
+        for (int y = 0; y < yt; y++, i++) {
+            const int y_ref = ((yt / 2) + yt - y) % yt;
+            rows[i][0] = (z * yt + y) * XC * 2;
+            rows[i][1] = (z_ref * yt + y_ref) * XC * 2;
+        }
+    }
+}
+
 static void t3d_build_tables(comp_transform3d_t *t)
 {
     const int pal = t->standard == COMP_STD_PAL;
     const int yt = pal ? YTILE_PAL : YTILE;
-    int i = 0, bin = 0;
+    int bin = 0;
 
+    comp_t3d_rowpair(t->standard, t->rowpair);
     t->nspecial = 0;
     for (int z = 0; z < ZTILE; z++) {
-        const int z_ref = pal ? (ZTILE - z) % ZTILE
-                              : ((ZTILE / 2) + ZTILE - z) % ZTILE;
-        for (int y = 0; y < yt; y++, i++, bin += 3) {
+        for (int y = 0; y < yt; y++, bin += 3) {
             const int y_ref = ((yt / 2) + yt - y) % yt;
-            t->rowpair[i][0] = (z * yt + y) * XC * 2;
-            t->rowpair[i][1] = (z_ref * yt + y_ref) * XC * 2;
-
+            const int z_ref = pal ? (ZTILE - z) % ZTILE
+                                  : ((ZTILE / 2) + ZTILE - z) % ZTILE;
             const int keep = pal
                 ? (y == y_ref && z == z_ref)
                 : ((y == YTILE / 4 && z == ZTILE / 4)
@@ -241,6 +258,14 @@ static void lut_gain_row_c(float *g, float *r, const float *m_in,
                              const float (*lut)[COMP_LUT_K], int n)
 LUT_GAIN_ASM(sse4);
 LUT_GAIN_ASM(avx2);
+
+#define T3D_ROW_ASM(isa)                                                    \
+    void comp_t3d_mag_##isa(float *m_in, float *m_ref, const float *in,     \
+                            const int32_t (*rows)[2], int nrows);           \
+    void comp_t3d_apply_##isa(float *out, const float *in, const float *g,  \
+                              const int32_t (*rows)[2], int nrows)
+T3D_ROW_ASM(sse2);
+T3D_ROW_ASM(avx2);
 #endif
 
 comp_lut_gain_fn comp_get_lut_gain_fn(unsigned cpu)
@@ -253,6 +278,30 @@ comp_lut_gain_fn comp_get_lut_gain_fn(unsigned cpu)
 #endif
     (void)cpu;
     return lut_gain_row_c;
+}
+
+comp_t3d_mag_fn comp_get_t3d_mag_fn(unsigned cpu)
+{
+#if defined(__x86_64__)
+    if (cpu & COMP_CPU_AVX2)
+        return comp_t3d_mag_avx2;
+    if (cpu & COMP_CPU_SSE2)
+        return comp_t3d_mag_sse2;
+#endif
+    (void)cpu;
+    return t3d_mag_c;
+}
+
+comp_t3d_apply_fn comp_get_t3d_apply_fn(unsigned cpu)
+{
+#if defined(__x86_64__)
+    if (cpu & COMP_CPU_AVX2)
+        return comp_t3d_apply_avx2;
+    if (cpu & COMP_CPU_SSE2)
+        return comp_t3d_apply_sse2;
+#endif
+    (void)cpu;
+    return t3d_apply_c;
 }
 
 /* Trained-LUT filter, both standards, staged so the divide-and-
@@ -279,7 +328,7 @@ static float apply_filter_lut(const comp_transform3d_t *t,
 
     memset(out, 0, sizeof(fftwf_complex) * ZTILE * yt * XC);
 
-    t3d_mag_c(m_in, m_ref, (const float *)in, t->rowpair, nrows);
+    t->t3d_mag(m_in, m_ref, (const float *)in, t->rowpair, nrows);
     t->lut_gain(g, r, m_in, m_ref, t->lut, nbins);
 
     /* LF-luma evidence scales the gains per bin (PAL option) */
@@ -327,7 +376,7 @@ static float apply_filter_lut(const comp_transform3d_t *t,
         }
     }
 
-    t3d_apply_c((float *)out, (const float *)in, g, t->rowpair, nrows);
+    t->t3d_apply((float *)out, (const float *)in, g, t->rowpair, nrows);
 
     /* discarded self-column bins stay zero; both their writers are
      * themselves discards, so a post-pass restores the memset state */

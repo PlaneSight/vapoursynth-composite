@@ -54,12 +54,32 @@ typedef void (*comp_lut_gain_fn)(float *g, float *r, const float *m_in,
                                  const float (*lut)[COMP_LUT_K], int n);
 comp_lut_gain_fn comp_get_lut_gain_fn(unsigned cpu);
 
+/* fill rows[i] = { own, ref } float offsets of bin row i's own and
+ * reflected (z, y) tile rows; nrows is ZTILE * ytile of the standard */
+void comp_t3d_rowpair(int standard, int32_t (*rows)[2]);
+
+/* Dispatched row kernels over the bin-row table. mag fills the linear
+ * per-bin magnitude rows, the reflected side read reversed; apply
+ * writes the gain-scaled x bands in table order, preserving the
+ * twice-visited x = XTILE/4 column's later-write-wins semantics.
+ * Both may store up to COMP_T3D_BINPAD floats past 3 * nrows into the
+ * per-bin arrays (and apply reads as far into g); tile positions
+ * outside the bands are never touched. */
+typedef void (*comp_t3d_mag_fn)(float *m_in, float *m_ref, const float *in,
+                                const int32_t (*rows)[2], int nrows);
+typedef void (*comp_t3d_apply_fn)(float *out, const float *in, const float *g,
+                                  const int32_t (*rows)[2], int nrows);
+comp_t3d_mag_fn comp_get_t3d_mag_fn(unsigned cpu);
+comp_t3d_apply_fn comp_get_t3d_apply_fn(unsigned cpu);
+
 typedef struct comp_transform3d_t comp_transform3d_t;
 
 struct comp_transform3d_t {
     fftwf_plan forward;
     fftwf_plan inverse;
     comp_lut_gain_fn lut_gain;
+    comp_t3d_mag_fn t3d_mag;
+    comp_t3d_apply_fn t3d_apply;
     int standard;
     int level;
     int use_lut;
