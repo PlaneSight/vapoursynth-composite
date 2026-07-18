@@ -189,10 +189,12 @@ static AVS_Value comp_avs_zresize(AVS_ScriptEnvironment *env, AVS_Value clip,
                                   double src_left, double src_width)
 {
     if (!avs_function_exists(env, "z_ConvertFormat")) {
+        /* the host does not copy the string, so hand it a saved one:
+         * a local buffer would be dead by the time it is read */
         char msg[128];
         snprintf(msg, sizeof(msg),
                  "%s: avsresize (z_ConvertFormat) is required but not loaded", who);
-        return avs_new_value_error(msg);
+        return avs_new_value_error(avs_save_string(env, msg, -1));
     }
 
     const int crop = src_left == src_left && src_width == src_width; /* !NaN */
@@ -888,7 +890,7 @@ static AVS_Value AVSC_CC comp_avs_res_create(AVS_ScriptEnvironment *env,
         avs_release_clip(dec_clip);
         char msg[128];
         snprintf(msg, sizeof(msg), "Restore: %s", terr);
-        return avs_new_value_error(msg);
+        return avs_new_value_error(avs_save_string(env, msg, -1));
     }
     dfi->vi.pixel_type = AVS_CS_YUV444P16;
     dfi->get_frame = comp_avs_dec_get_frame;
