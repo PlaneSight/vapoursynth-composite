@@ -26,6 +26,17 @@
 #include "decode.h"
 #include "encode.h"
 
+/* This file is compiled with -ffp-contract=off (see meson.build): the
+ * float separation heuristics feed discrete choices -- ntsc_comb2d's
+ * output drives split3d's candidate compare -- so a contracted a*b+c*d
+ * (single-rounded FMA) here would pick different candidates than the
+ * SIMD tiers and than a non-FMA build, changing the 3D output. ISO C
+ * modes happen to default the contraction off, but the flag pins it so
+ * the reference does not depend on -std surviving (the STDC FP_CONTRACT
+ * pragma does not override an explicit -ffp-contract=fast on gcc 13).
+ * D044/D047; contrast the terminal float kernels where FMA is a
+ * welcome accuracy gain. */
+
 #ifndef M_PI
 #define M_PI 3.14159265358979323846
 #endif
@@ -176,6 +187,7 @@ int comp_decode_init(comp_decode_t *d, int standard, double threshold,
     d->pal_demod = comp_get_pal_demod_fn(comp_cpu_detect());
     d->fir_row = comp_get_fir_row_q15_fn(comp_cpu_detect());
     d->split3d_row = comp_get_split3d_row_fn(comp_cpu_detect());
+    d->comb2d_row = comp_get_ntsc_comb2d_row_fn(comp_cpu_detect());
     if (eq == 2)
         design_narrow(d, standard == COMP_STD_PAL ? 4.0 * 4433618.75
                                                   : 4.0 * 3579545.0);
@@ -732,6 +744,71 @@ static void ntsc_comb1d(const comp_decode_t *d, int rows,
  * the differences against the lines ±2 frame rows away (the same
  * field's neighboring lines, 180 degrees out of chroma phase),
  * weighted by similarity. */
+/* C reference for the dispatched NTSC 2D comb row kernel; see decode.h.
+ * Writes out[x] for x in [1, w). Compiled with -ffp-contract=off so the
+ * SIMD tiers can be bit-exact (this output feeds split3d's compare). */
+static void ntsc_comb2d_row_c(float *out, const float *cur, const float *prev,
+                              const float *next, const float *krangep, int w)
+{
+    const float krange = *krangep;
+    for (int x = 1; x < w; x++) {
+        float kp, kn;
+
+        kp  = fabsf(fabsf(cur[x]) - fabsf(prev[x]));
+        kp += fabsf(fabsf(cur[x - 1]) - fabsf(prev[x - 1]));
+        kp -= (fabsf(cur[x]) + fabsf(prev[x - 1])) * 0.10f;
+        kn  = fabsf(fabsf(cur[x]) - fabsf(next[x]));
+        kn += fabsf(fabsf(cur[x - 1]) - fabsf(next[x - 1]));
+        kn -= (fabsf(cur[x]) + fabsf(next[x - 1])) * 0.10f;
+
+        kp = 1.0f - kp / krange;
+        kp = kp < 0.0f ? 0.0f : kp > 1.0f ? 1.0f : kp;
+        kn = 1.0f - kn / krange;
+        kn = kn < 0.0f ? 0.0f : kn > 1.0f ? 1.0f : kn;
+
+        float sc = 1.0f;
+        if (kn > 0.0f || kp > 0.0f) {
+            if (kn > 3.0f * kp)
+                kp = 0.0f;
+            else if (kp > 3.0f * kn)
+                kn = 0.0f;
+            sc = 2.0f / (kn + kp);
+            if (sc < 1.0f)
+                sc = 1.0f;
+        } else if (fabsf(fabsf(prev[x]) - fabsf(next[x]))
+                   - fabsf((next[x] + prev[x]) * 0.2f) <= 0.0f) {
+            kn = kp = 1.0f;
+        }
+
+        out[x] = ((cur[x] - prev[x]) * kp * sc
+                + (cur[x] - next[x]) * kn * sc) / 4.0f;
+    }
+}
+
+#if defined(__x86_64__)
+#define NTSC_COMB2D_ROW_ASM(isa)                                            \
+    void comp_ntsc_comb2d_row_##isa(float *out, const float *cur,           \
+                                    const float *prev, const float *next,   \
+                                    const float *krange, int w)
+NTSC_COMB2D_ROW_ASM(sse4);
+NTSC_COMB2D_ROW_ASM(avx2);
+NTSC_COMB2D_ROW_ASM(avx512);
+#endif
+
+comp_ntsc_comb2d_row_fn comp_get_ntsc_comb2d_row_fn(unsigned cpu)
+{
+#if defined(__x86_64__)
+    if (cpu & COMP_CPU_AVX512)
+        return comp_ntsc_comb2d_row_avx512;
+    if (cpu & COMP_CPU_AVX2)
+        return comp_ntsc_comb2d_row_avx2;
+    if (cpu & COMP_CPU_SSE41)
+        return comp_ntsc_comb2d_row_sse4;
+#endif
+    (void)cpu;
+    return ntsc_comb2d_row_c;
+}
+
 static void ntsc_comb2d(const comp_decode_t *d, int rows, const float *c1, float *c2)
 {
     const int w = d->width;
@@ -744,38 +821,7 @@ static void ntsc_comb2d(const comp_decode_t *d, int rows, const float *c1, float
         float *out = c2 + r * w;
 
         out[0] = 0.0f;
-        for (int x = 1; x < w; x++) {
-            float kp, kn;
-
-            kp  = fabsf(fabsf(cur[x]) - fabsf(prev[x]));
-            kp += fabsf(fabsf(cur[x - 1]) - fabsf(prev[x - 1]));
-            kp -= (fabsf(cur[x]) + fabsf(prev[x - 1])) * 0.10f;
-            kn  = fabsf(fabsf(cur[x]) - fabsf(next[x]));
-            kn += fabsf(fabsf(cur[x - 1]) - fabsf(next[x - 1]));
-            kn -= (fabsf(cur[x]) + fabsf(next[x - 1])) * 0.10f;
-
-            kp = 1.0f - kp / krange;
-            kp = kp < 0.0f ? 0.0f : kp > 1.0f ? 1.0f : kp;
-            kn = 1.0f - kn / krange;
-            kn = kn < 0.0f ? 0.0f : kn > 1.0f ? 1.0f : kn;
-
-            float sc = 1.0f;
-            if (kn > 0.0f || kp > 0.0f) {
-                if (kn > 3.0f * kp)
-                    kp = 0.0f;
-                else if (kp > 3.0f * kn)
-                    kn = 0.0f;
-                sc = 2.0f / (kn + kp);
-                if (sc < 1.0f)
-                    sc = 1.0f;
-            } else if (fabsf(fabsf(prev[x]) - fabsf(next[x]))
-                       - fabsf((next[x] + prev[x]) * 0.2f) <= 0.0f) {
-                kn = kp = 1.0f;
-            }
-
-            out[x] = ((cur[x] - prev[x]) * kp * sc
-                    + (cur[x] - next[x]) * kn * sc) / 4.0f;
-        }
+        d->comb2d_row(out, cur, prev, next, &krange, w);
     }
 }
 

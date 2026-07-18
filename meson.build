@@ -25,8 +25,7 @@ threads_dep = dependency('threads')
 core_deps = [m_dep, fftw3f_dep, threads_dep]
 
 core_sources = files('src/subcarrier.c', 'src/encode.c', 'src/transform2d.c',
-                     'src/transform3d.c', 'src/fft.c', 'src/decode.c',
-                     'src/cpu.c')
+                     'src/transform3d.c', 'src/fft.c', 'src/cpu.c')
 
 if host_machine.cpu_family() == 'x86_64'
     add_languages('nasm', native: false)
@@ -37,13 +36,27 @@ if host_machine.cpu_family() == 'x86_64'
     )
     core_sources += files('x86/cpu.asm', 'x86/pal_demod.asm', 'x86/fir_row.asm',
                           'x86/split3d.asm', 'x86/lut_gain.asm',
-                          'x86/t3d_filter.asm', 'x86/fft.asm')
+                          'x86/t3d_filter.asm', 'x86/comb2d.asm', 'x86/fft.asm')
 endif
+
+# decode.c's float separation heuristics feed discrete candidate choices
+# (ntsc_comb2d -> split3d compare), so FMA contraction there would change
+# the 3D output and break the byte-identical SIMD contract. ISO C modes
+# default this off, but pin it so the reference is stable under any -std
+# (the STDC FP_CONTRACT pragma does not override -ffp-contract=fast on gcc).
+decode_lib = static_library('composite_decode',
+    files('src/decode.c'),
+    c_args: cc.get_supported_arguments('-ffp-contract=off'),
+    dependencies: core_deps,
+    gnu_symbol_visibility: 'hidden',
+    pic: true,
+)
 
 core = static_library('composite_core',
     core_sources,
     dependencies: core_deps,
     gnu_symbol_visibility: 'hidden',
+    link_whole: decode_lib,
     pic: true,
 )
 
@@ -98,8 +111,8 @@ if checkasm_dep.found()
     checkasm_exe = executable('checkasm',
         files('test/checkasm/main.c', 'test/checkasm/pal_demod.c',
               'test/checkasm/fir_row.c', 'test/checkasm/split3d.c',
-              'test/checkasm/lut_gain.c', 'test/checkasm/t3d_filter.c',
-              'test/checkasm/fft.c'),
+              'test/checkasm/comb2d.c', 'test/checkasm/lut_gain.c',
+              'test/checkasm/t3d_filter.c', 'test/checkasm/fft.c'),
         dependencies: [checkasm_dep] + core_deps,
         include_directories: include_directories('src'),
         link_with: core,

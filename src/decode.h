@@ -76,6 +76,21 @@ typedef void (*comp_split3d_row_fn)(int16_t *out, const float *c1c,
 
 comp_split3d_row_fn comp_get_split3d_row_fn(unsigned cpu);
 
+/* NTSC 2D adaptive line comb for one row (comb.cpp split2D): compares
+ * the current line against the same-phase lines two above and two below
+ * and blends whichever pair matches, writing out[x] for x in [1, w).
+ * The caller writes out[0] and provides prev/next rows, substituting a
+ * zero line beyond the frame edges. krange (the comb adaptivity range)
+ * is passed by pointer to keep the asm ABI GPR-only. Bit-exact with the
+ * C reference (no FMA): its output feeds split3d's candidate compare,
+ * so a single-ULP drift would change the 3D result. The kernel
+ * over-reads neither past out[w] nor its inputs past [w]. */
+typedef void (*comp_ntsc_comb2d_row_fn)(float *out, const float *cur,
+                                        const float *prev, const float *next,
+                                        const float *krange, int w);
+
+comp_ntsc_comb2d_row_fn comp_get_ntsc_comb2d_row_fn(unsigned cpu);
+
 typedef struct comp_decode_scratch_t comp_decode_scratch_t;
 
 struct comp_decode_scratch_t {
@@ -119,6 +134,7 @@ struct comp_decode_t {
     comp_pal_demod_fn pal_demod;
     comp_fir_row_q15_fn fir_row;
     comp_split3d_row_fn split3d_row;
+    comp_ntsc_comb2d_row_fn comb2d_row;
     comp_transform2d_t transform;
     comp_transform3d_t transform3;
     comp_t3d_cache_t t3cache;    /* 3D transform slab cache */
