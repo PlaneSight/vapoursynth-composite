@@ -7,6 +7,7 @@ void checkasm_test_fir_row(void);
 void checkasm_test_split3d(void);
 void checkasm_test_lut_gain(void);
 void checkasm_test_t3d_filter(void);
+void checkasm_test_fft(void);
 
 static const CheckasmCpuInfo cpu_flags[] = {
     { "SSE2", "sse2", COMP_CPU_SSE2 },
@@ -22,6 +23,7 @@ static const CheckasmTest tests[] = {
     { "split3d", checkasm_test_split3d },
     { "lut_gain", checkasm_test_lut_gain },
     { "t3d_filter", checkasm_test_t3d_filter },
+    { "fft", checkasm_test_fft },
     {0}
 };
 

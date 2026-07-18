@@ -51,8 +51,8 @@ static void test_standard(int standard)
     float *rout = fftwf_alloc_real(nreal);
     fftwf_complex *cf = fftwf_alloc_complex(ncplx);
     fftwf_complex *cs = fftwf_alloc_complex(ncplx);
-    float *band = malloc(sizeof(float) * ZT * yt * NCOL * 2);
-    float *band2 = malloc(sizeof(float) * ZT * yt * NCOL * 2);
+    float *band = malloc(sizeof(float) * ZT * yt * COMP_FFT_ROWSTRIDE);
+    float *band2 = malloc(sizeof(float) * ZT * yt * COMP_FFT_ROWSTRIDE);
     float *rmine = malloc(sizeof(float) * nreal);
 
     fftwf_plan pf = fftwf_plan_dft_r2c_3d(ZT, yt, XT, rin, cf, FFTW_ESTIMATE);
@@ -73,7 +73,7 @@ static void test_standard(int standard)
         for (int y = 0; y < yt; y++)
             for (int c = 0; c < NCOL; c++) {
                 const float *m = band
-                    + ((bitrev(z, 3) * yt + bitrev(y, ybits)) * NCOL + c) * 2;
+                    + ((bitrev(z, 3) * yt + bitrev(y, ybits)) * (COMP_FFT_ROWSTRIDE / 2) + c) * 2;
                 const fftwf_complex *f = &cf[(z * yt + y) * XC + C0 + c];
                 const double dr = m[0] - (*f)[0], di = m[1] - (*f)[1];
                 const double e = sqrt(dr * dr + di * di);
@@ -93,7 +93,7 @@ static void test_standard(int standard)
                 cs[i][0] = cf[i][0];
                 cs[i][1] = cf[i][1];
                 float *m = band2
-                    + ((bitrev(z, 3) * yt + bitrev(y, ybits)) * NCOL + c) * 2;
+                    + ((bitrev(z, 3) * yt + bitrev(y, ybits)) * (COMP_FFT_ROWSTRIDE / 2) + c) * 2;
                 m[0] = cf[i][0];
                 m[1] = cf[i][1];
             }

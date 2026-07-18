@@ -7,8 +7,9 @@
  * the x band the bin filter uses (columns XTILE/8 .. XTILE/4 + 2,
  * i.e. 2..6 of the 9 r2c columns).
  *
- * Forward: windowed real tile [ZTILE][ytile][XTILE] -> packed band
- * tile [ZTILE][ytile][COMP_FFT_NCOL] complex (interleaved floats),
+ * Forward: windowed real tile [ZTILE][ytile][XTILE] -> band tile
+ * [ZTILE][ytile][COMP_FFT_ROWSTRIDE] complex-interleaved floats
+ * (COMP_FFT_NCOL valid columns, the rest zero),
  * with the (ky, kz) axes in bit-reversed order (decimation in
  * frequency, no permutation pass; the bin filter's tables absorb the
  * numbering). Only the band columns are computed, which is valid for
@@ -23,6 +24,10 @@
  * their rounding differs from FFTW's: the internal path's output is
  * not byte-identical to the FFTW path's. */
 #define COMP_FFT_NCOL (COMP_T3D_XTILE / 4 - COMP_T3D_XTILE / 8 + 3)
+
+/* band rows are padded to a 64-byte stride (16 floats, 8 complex) so
+ * the vector passes work on whole registers; columns NCOL..7 are zero */
+#define COMP_FFT_ROWSTRIDE COMP_T3D_XTILE
 
 typedef void (*comp_fft_fwd_fn)(float *band, const float *real);
 typedef void (*comp_fft_inv_fn)(float *real, float *band);

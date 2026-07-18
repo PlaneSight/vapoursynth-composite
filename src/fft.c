@@ -13,12 +13,14 @@
 
 #include <stddef.h>
 
+#include "cpu.h"
 #include "fft.h"
 #include "subcarrier.h"
 
 #define ZT COMP_T3D_ZTILE
 #define XT COMP_T3D_XTILE
 #define NCOL COMP_FFT_NCOL
+#define RS16 (COMP_FFT_ROWSTRIDE / 2)  /* band row stride, complex */
 #define C0 (COMP_T3D_XTILE / 8)  /* first band column */
 
 typedef struct { float re, im; } fcpx;
@@ -111,6 +113,8 @@ static void rfft16_row(const float *x, fcpx *out)
         c[j].im = x[2 * j + 1];
     }
     cfft8(c);
+    for (int k = NCOL; k < RS16; k++)
+        out[k].re = out[k].im = 0.0f;
     for (int k = C0; k <= C0 + NCOL - 1; k++) {
         const fcpx ck = c[k & 7];
         const fcpx cn = c[(8 - k) & 7];
@@ -205,22 +209,22 @@ static void fft_fwd(float *band, const float *real, int yt, const fcpx *twy)
 {
     fcpx *b = (fcpx *)band;
     for (int r = 0; r < ZT * yt; r++)
-        rfft16_row(real + r * XT, b + r * NCOL);
+        rfft16_row(real + r * XT, b + r * RS16);
     for (int z = 0; z < ZT; z++)
-        pass_dif(b + z * yt * NCOL, yt, NCOL, twy);
+        pass_dif(b + z * yt * RS16, yt, RS16, twy);
     for (int y = 0; y < yt; y++)
-        pass_dif(b + y * NCOL, ZT, yt * NCOL, tw8);
+        pass_dif(b + y * RS16, ZT, yt * RS16, tw8);
 }
 
 static void fft_inv(float *real, float *band, int yt, const fcpx *twy)
 {
     fcpx *b = (fcpx *)band;
     for (int y = 0; y < yt; y++)
-        pass_dit(b + y * NCOL, ZT, yt * NCOL, tw8);
+        pass_dit(b + y * RS16, ZT, yt * RS16, tw8);
     for (int z = 0; z < ZT; z++)
-        pass_dit(b + z * yt * NCOL, yt, NCOL, twy);
+        pass_dit(b + z * yt * RS16, yt, RS16, twy);
     for (int r = 0; r < ZT * yt; r++)
-        irfft16_row(b + r * NCOL, real + r * XT);
+        irfft16_row(b + r * RS16, real + r * XT);
 }
 
 static void fft_fwd_ntsc_c(float *band, const float *real)
@@ -243,14 +247,69 @@ static void fft_inv_pal_c(float *real, float *band)
     fft_inv(real, band, COMP_T3D_YTILE_PAL, tw16);
 }
 
+#if defined(__x86_64__)
+void comp_fft_dif_avx2(float *base, int n, ptrdiff_t stride, int count,
+                       ptrdiff_t cstride, const float *tw);
+void comp_fft_dit_avx2(float *base, int n, ptrdiff_t stride, int count,
+                       ptrdiff_t cstride, const float *tw);
+void comp_fft_x_fwd_avx2(float *band, const float *real, int nrows);
+void comp_fft_x_inv_avx2(float *real, const float *band, int nrows);
+
+#define ROWB (COMP_FFT_ROWSTRIDE * 4)  /* band row, bytes */
+
+static void fft_fwd_ntsc_avx2(float *band, const float *real)
+{
+    comp_fft_x_fwd_avx2(band, real, ZT * COMP_T3D_YTILE);
+    comp_fft_dif_avx2(band, COMP_T3D_YTILE, ROWB, ZT,
+                      COMP_T3D_YTILE * ROWB, (const float *)tw32);
+    comp_fft_dif_avx2(band, ZT, COMP_T3D_YTILE * ROWB, COMP_T3D_YTILE,
+                      ROWB, (const float *)tw8);
+}
+
+static void fft_fwd_pal_avx2(float *band, const float *real)
+{
+    comp_fft_x_fwd_avx2(band, real, ZT * COMP_T3D_YTILE_PAL);
+    comp_fft_dif_avx2(band, COMP_T3D_YTILE_PAL, ROWB, ZT,
+                      COMP_T3D_YTILE_PAL * ROWB, (const float *)tw16);
+    comp_fft_dif_avx2(band, ZT, COMP_T3D_YTILE_PAL * ROWB,
+                      COMP_T3D_YTILE_PAL, ROWB, (const float *)tw8);
+}
+
+static void fft_inv_ntsc_avx2(float *real, float *band)
+{
+    comp_fft_dit_avx2(band, ZT, COMP_T3D_YTILE * ROWB, COMP_T3D_YTILE,
+                      ROWB, (const float *)tw8);
+    comp_fft_dit_avx2(band, COMP_T3D_YTILE, ROWB, ZT,
+                      COMP_T3D_YTILE * ROWB, (const float *)tw32);
+    comp_fft_x_inv_avx2(real, band, ZT * COMP_T3D_YTILE);
+}
+
+static void fft_inv_pal_avx2(float *real, float *band)
+{
+    comp_fft_dit_avx2(band, ZT, COMP_T3D_YTILE_PAL * ROWB,
+                      COMP_T3D_YTILE_PAL, ROWB, (const float *)tw8);
+    comp_fft_dit_avx2(band, COMP_T3D_YTILE_PAL, ROWB, ZT,
+                      COMP_T3D_YTILE_PAL * ROWB, (const float *)tw16);
+    comp_fft_x_inv_avx2(real, band, ZT * COMP_T3D_YTILE_PAL);
+}
+#endif
+
 comp_fft_fwd_fn comp_get_fft_fwd_fn(int standard, unsigned cpu)
 {
-    (void)cpu;  /* the avx2 tier arrives with the asm */
+#if defined(__x86_64__)
+    if (cpu & COMP_CPU_AVX2)
+        return standard == COMP_STD_PAL ? fft_fwd_pal_avx2 : fft_fwd_ntsc_avx2;
+#endif
+    (void)cpu;
     return standard == COMP_STD_PAL ? fft_fwd_pal_c : fft_fwd_ntsc_c;
 }
 
 comp_fft_inv_fn comp_get_fft_inv_fn(int standard, unsigned cpu)
 {
+#if defined(__x86_64__)
+    if (cpu & COMP_CPU_AVX2)
+        return standard == COMP_STD_PAL ? fft_inv_pal_avx2 : fft_inv_ntsc_avx2;
+#endif
     (void)cpu;
     return standard == COMP_STD_PAL ? fft_inv_pal_c : fft_inv_ntsc_c;
 }
