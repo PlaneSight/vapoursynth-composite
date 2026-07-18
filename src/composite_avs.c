@@ -41,6 +41,7 @@ struct comp_avs_dec_t {
     int standard;
     int height;      /* raster height of the composite input */
     int in_frames;   /* source clip length, for edge clamping */
+    AVS_Clip *anchor; /* Restore: the raster picture for refine, else NULL */
 };
 
 /* Where the picture sits in the raster, matching composite.c: a 480-line
@@ -132,9 +133,16 @@ static AVS_VideoFrame *AVSC_CC comp_avs_dec_get_frame(AVS_FilterInfo *fi, int n)
     AVS_VideoFrame *src = srcs[look];
     AVS_VideoFrame *dst = avs_new_video_frame_p(env, &fi->vi, src);
 
+    /* Restore: the raster anchor picture for the refine loop. It is
+     * spatial (frame n only, always in range), unlike the composite
+     * window. */
+    AVS_VideoFrame *anchor = f->anchor ? avs_get_frame(f->anchor, n) : NULL;
+
     comp_decode_frame(&f->dec, n, f->in_frames, f->height,
                       comp_avs_row_offset(f->standard, f->height, env, src),
-                      views, view_frames, look, NULL, 0,
+                      views, view_frames, look,
+                      anchor ? (const uint16_t *)avs_get_read_ptr_p(anchor, AVS_PLANAR_Y) : NULL,
+                      anchor ? avs_get_pitch_p(anchor, AVS_PLANAR_Y) / 2 : 0,
                       (uint16_t *)avs_get_write_ptr_p(dst, AVS_PLANAR_Y),
                       avs_get_pitch_p(dst, AVS_PLANAR_Y) / 2,
                       (uint16_t *)avs_get_write_ptr_p(dst, AVS_PLANAR_U),
@@ -142,6 +150,8 @@ static AVS_VideoFrame *AVSC_CC comp_avs_dec_get_frame(AVS_FilterInfo *fi, int n)
                       (uint16_t *)avs_get_write_ptr_p(dst, AVS_PLANAR_V),
                       avs_get_pitch_p(dst, AVS_PLANAR_V) / 2);
 
+    if (anchor)
+        avs_release_video_frame(anchor);
     for (int i = 0; i <= 2 * look; i++)
         avs_release_video_frame(srcs[i]);
     return dst;
@@ -160,6 +170,8 @@ static void AVSC_CC comp_avs_dec_free(AVS_FilterInfo *fi)
 {
     comp_avs_dec_t *f = fi->user_data;
     comp_decode_free(&f->dec);
+    if (f->anchor)
+        avs_release_clip(f->anchor);
     free(f);
 }
 
@@ -167,8 +179,10 @@ static void AVSC_CC comp_avs_dec_free(AVS_FilterInfo *fi)
  * src_width=): one zimg graph does the format conversion and the subpixel
  * crop-resize, the same fused operation the VS plugin gets from
  * resize.Spline36 (same resampler, chroma placement, and parameters).
- * `clip` is a non-owning element copy; avs_invoke does not consume it.
- * Returns an error AVS_Value if avsresize is not installed. */
+ * A NaN src_left/src_width omits the subpixel crop (a plain resize, as
+ * the Restore edge-splice needs for the source). `clip` is a non-owning
+ * element copy; avs_invoke does not consume it. Returns an error
+ * AVS_Value if avsresize is not installed. */
 static AVS_Value comp_avs_zresize(AVS_ScriptEnvironment *env, AVS_Value clip,
                                   const char *who, int width, int height,
                                   const char *pixel_type,
@@ -181,16 +195,21 @@ static AVS_Value comp_avs_zresize(AVS_ScriptEnvironment *env, AVS_Value clip,
         return avs_new_value_error(msg);
     }
 
+    const int crop = src_left == src_left && src_width == src_width; /* !NaN */
     AVS_Value args[6];
     const char *names[6];
-    args[0] = clip;                                  names[0] = NULL;
-    args[1] = avs_new_value_int(width);              names[1] = "width";
-    args[2] = avs_new_value_int(height);             names[2] = "height";
-    args[3] = avs_new_value_string(pixel_type);      names[3] = "pixel_type";
-    args[4] = avs_new_value_float((float)src_left);  names[4] = "src_left";
-    args[5] = avs_new_value_float((float)src_width); names[5] = "src_width";
+    int n = 4;
+    args[0] = clip;                              names[0] = NULL;
+    args[1] = avs_new_value_int(width);          names[1] = "width";
+    args[2] = avs_new_value_int(height);         names[2] = "height";
+    args[3] = avs_new_value_string(pixel_type);  names[3] = "pixel_type";
+    if (crop) {
+        args[4] = avs_new_value_float((float)src_left);  names[4] = "src_left";
+        args[5] = avs_new_value_float((float)src_width); names[5] = "src_width";
+        n = 6;
+    }
 
-    AVS_Value argv = avs_new_value_array(args, 6);
+    AVS_Value argv = avs_new_value_array(args, n);
     return avs_invoke(env, "z_ConvertFormat", argv, (const char **)names);
 }
 
@@ -255,6 +274,26 @@ static AVS_Value comp_avs_pad_h(AVS_ScriptEnvironment *env, AVS_Value clip,
     avs_release_value(cols[0]);
     avs_release_value(cols[2]);
     (void)who;
+    return ret;
+}
+
+/* Resample a raster YUV444P16 clip back to the caller's `out_width` x
+ * `height` BT.601 raster: replicate-pad, then the inverse zimg crop. The
+ * pad's COMP_EDGE_PAD offset is already folded into src_left by
+ * comp_decode_resample_params. Does not consume `clip`. */
+static AVS_Value comp_avs_resample_back(AVS_ScriptEnvironment *env, AVS_Value clip,
+                                        const char *who, int standard,
+                                        int out_width, int height)
+{
+    AVS_Value padded = comp_avs_pad_h(env, clip, who);
+    if (avs_is_error(padded))
+        return padded;
+
+    double dst_left, dst_width;
+    comp_decode_resample_params(standard, out_width, &dst_left, &dst_width);
+    AVS_Value ret = comp_avs_zresize(env, padded, who, out_width, height,
+                                     "YUV444P16", dst_left, dst_width);
+    avs_release_value(padded);
     return ret;
 }
 
@@ -562,25 +601,329 @@ static AVS_Value AVSC_CC comp_avs_dec_create(AVS_ScriptEnvironment *env,
     fi->free_filter = comp_avs_dec_free;
     fi->user_data = f;
 
-    /* resample back to the caller's BT.601 raster: pad with replicated
-     * edge columns (the 601 window overreads the active raster), then the
-     * inverse zimg crop. */
+    /* resample back to the caller's BT.601 raster */
+    AVS_Value dec_v;
+    avs_set_to_clip(&dec_v, dec_clip);
+    avs_release_clip(dec_clip);
+    AVS_Value ret = comp_avs_resample_back(env, dec_v, "Decode", standard,
+                                           width, in_h);
+    avs_release_value(dec_v);
+    return ret;
+}
+
+/* validate and install the threshold/lut arrays onto a decoder, or the
+ * built-in default. Returns an error string (static) or NULL on success. */
+static const char *comp_avs_install_tables(comp_decode_t *dec, int standard,
+                                           int dimensions, AVS_Value thr_arr,
+                                           int nthresh, AVS_Value lut_arr,
+                                           int nlut, int builtin_lut)
+{
+    if (nthresh > 0) {
+        double *tv = malloc(sizeof(double) * nthresh);
+        for (int i = 0; i < nthresh; i++) {
+            tv[i] = avs_as_float(avs_array_elt(thr_arr, i));
+            if (!(tv[i] > 0.0 && tv[i] <= 1.0)) {
+                free(tv);
+                return "thresholds must be in (0, 1]";
+            }
+        }
+        comp_decode_set_thresholds(dec, tv, nthresh);
+        free(tv);
+    }
+    if (nlut > 0) {
+        double *lv = malloc(sizeof(double) * nlut);
+        for (int i = 0; i < nlut; i++) {
+            lv[i] = avs_as_float(avs_array_elt(lut_arr, i));
+            if (!(lv[i] >= 0.0 && lv[i] <= 1.0)) {
+                free(lv);
+                return "lut values must be in [0, 1]";
+            }
+        }
+        comp_decode_set_lut(dec, lv, nlut);
+        free(lv);
+    } else if (builtin_lut) {
+        comp_avs_set_builtin_lut(dec, standard, dimensions);
+    }
+    return NULL;
+}
+
+/* Splice the outermost output columns through from the source: they
+ * sample beyond the active raster and were never reconstructed. `restored`
+ * is the width x height decoded output; `src444` is the source resampled
+ * plainly to the same geometry. Consumes neither; returns a new clip. */
+static AVS_Value comp_avs_edge_splice(AVS_ScriptEnvironment *env, AVS_Value restored,
+                                      AVS_Value src444, int width, int nl, int nr)
+{
+    /* left source part | middle restored part | right source part */
+    AVS_Value parts[3];
+    int np = 0;
+    if (nl > 0) {
+        AVS_Value c[5] = { src444, avs_new_value_int(0), avs_new_value_int(0),
+                           avs_new_value_int(nl), avs_new_value_int(0) };
+        parts[np] = comp_avs_invoke_pos(env, "Crop", c, 5);
+        if (avs_is_error(parts[np])) return parts[np];
+        np++;
+    }
+    {
+        AVS_Value c[5] = { restored, avs_new_value_int(nl), avs_new_value_int(0),
+                           avs_new_value_int(width - nl - nr), avs_new_value_int(0) };
+        parts[np] = comp_avs_invoke_pos(env, "Crop", c, 5);
+        if (avs_is_error(parts[np])) {
+            for (int i = 0; i < np; i++) avs_release_value(parts[i]);
+            return parts[np];
+        }
+        np++;
+    }
+    if (nr > 0) {
+        AVS_Value c[5] = { src444, avs_new_value_int(width - nr), avs_new_value_int(0),
+                           avs_new_value_int(nr), avs_new_value_int(0) };
+        parts[np] = comp_avs_invoke_pos(env, "Crop", c, 5);
+        if (avs_is_error(parts[np])) {
+            for (int i = 0; i < np; i++) avs_release_value(parts[i]);
+            return parts[np];
+        }
+        np++;
+    }
+
+    AVS_Value ret = comp_avs_invoke_pos(env, "StackHorizontal", parts, np);
+    for (int i = 0; i < np; i++)
+        avs_release_value(parts[i]);
+    return ret;
+}
+
+/* Restore(clip, standard, width, threshold, setup, dimensions, eq, refine,
+ *         thresholds, precomb, transform, level, lut, evidence, cti)
+ *  index:  0      1       2      3        4      5       6    7
+ *          8          9        10        11     12   13        14 */
+static AVS_Value AVSC_CC comp_avs_res_create(AVS_ScriptEnvironment *env,
+                                             AVS_Value args, void *user_data)
+{
+    (void)user_data;
+    AVS_Value clip_v = avs_array_elt(args, 0);
+
+    const char *std_s = avs_defined(avs_array_elt(args, 1))
+                        ? avs_as_string(avs_array_elt(args, 1)) : "pal";
+    int standard;
+    if (!strcmp(std_s, "pal"))
+        standard = COMP_STD_PAL;
+    else if (!strcmp(std_s, "ntsc"))
+        standard = COMP_STD_NTSC;
+    else
+        return avs_new_value_error("Restore: standard must be pal or ntsc");
+
+    /* validate the YUV source; width defaults to the source width */
+    AVS_Clip *src_clip = avs_take_clip(clip_v, env);
+    const AVS_VideoInfo *svi = avs_get_video_info(src_clip);
+    const int src_width = svi->width, in_h = svi->height;
+    const int is_yuv = avs_is_yuv(svi);
+    avs_release_clip(src_clip);
+
+    const int width = comp_avs_opt_int(args, 2, src_width);
+    if (width < 16 || width > 8192)
+        return avs_new_value_error("Restore: width must be between 16 and 8192");
+
+    const int threshold_unset = !avs_defined(avs_array_elt(args, 3));
+    const double threshold = comp_avs_opt_float(args, 3, 0.4);
+    if (!(threshold > 0.0 && threshold <= 1.0))
+        return avs_new_value_error("Restore: threshold must be in (0, 1]");
+
+    const int setup = comp_avs_opt_int(args, 4, 0);
+
+    const int dimensions = comp_avs_opt_int(args, 5, 3);
+    if (dimensions < 1 || dimensions > 3)
+        return avs_new_value_error("Restore: dimensions must be 1, 2 or 3");
+
+    const int eq_unset = !avs_defined(avs_array_elt(args, 6));
+    int eq = comp_avs_opt_int(args, 6, 1);
+    if (eq < 0 || eq > 2)
+        return avs_new_value_error("Restore: eq must be 0 (off), 1 (fixed) or 2 (leak-aware)");
+
+    const int refine = comp_avs_opt_int(args, 7, 1);
+    if (refine < 0 || refine > 16)
+        return avs_new_value_error("Restore: refine must be between 0 and 16");
+
+    AVS_Value thr_arr = avs_array_elt(args, 8);
+    const int nthresh = avs_defined(thr_arr) ? avs_array_size(thr_arr) : 0;
+
+    const int precomb = comp_avs_opt_int(args, 9, 0);
+
+    int transform = comp_avs_opt_int(args, 10, -1);
+    if (transform < 0)
+        transform = (standard == COMP_STD_NTSC && dimensions == 3) ? 2 : 0;
+    if (transform < 0 || transform > 2)
+        return avs_new_value_error("Restore: transform must be 0 (comb), 1 (transform) or 2 (hybrid)");
+    if (transform && standard != COMP_STD_NTSC)
+        return avs_new_value_error("Restore: transform applies to ntsc (pal always uses the transform)");
+    if (transform && dimensions != 3)
+        return avs_new_value_error("Restore: transform needs dimensions=3");
+
+    const int has_transform = standard == COMP_STD_PAL ? dimensions >= 2
+                                                       : transform != 0;
+    if (eq_unset && has_transform)
+        eq = 2;
+    if (eq == 2 && !has_transform)
+        return avs_new_value_error("Restore: eq=2 needs a transform separation");
+
+    const int level_unset = !avs_defined(avs_array_elt(args, 11));
+    const int level = comp_avs_opt_int(args, 11, 0);
+
+    AVS_Value lut_arr = avs_array_elt(args, 12);
+    const int nlut = avs_defined(lut_arr) ? avs_array_size(lut_arr) : 0;
+
+    const int builtin_lut = level_unset && has_transform && threshold_unset
+                            && nthresh < 1 && nlut < 1;
+    if (level && dimensions < 2)
+        return avs_new_value_error("Restore: level=1 needs dimensions 2 or 3");
+    if (level && standard == COMP_STD_NTSC && !transform)
+        return avs_new_value_error("Restore: level=1 needs a transform separation for ntsc");
+
+    const double evidence = comp_avs_opt_float(args, 13, 0.0);
+    if (evidence < 0.0)
+        return avs_new_value_error("Restore: evidence must be >= 0");
+    if (evidence > 0.0 && (standard != COMP_STD_PAL || dimensions < 2))
+        return avs_new_value_error("Restore: evidence needs a pal transform (dimensions 2 or 3)");
+
+    const int cti = comp_avs_opt_int(args, 14, 0);
+    if (cti && dimensions < 2)
+        return avs_new_value_error("Restore: cti needs dimensions 2 or 3");
+
+    if (!is_yuv)
+        return avs_new_value_error("Restore: clip must be YUV");
+    if (standard == COMP_STD_PAL) {
+        if (in_h != COMP_ACTIVE_HEIGHT_PAL)
+            return avs_new_value_error("Restore: pal input must have 576 lines");
+    } else {
+        if (in_h != 480 && in_h != COMP_ACTIVE_HEIGHT_NTSC)
+            return avs_new_value_error("Restore: ntsc input must have 480 or 486 lines");
+    }
+    if (nlut > 0 || nthresh > 0) {
+        if (standard == COMP_STD_NTSC && !transform)
+            return avs_new_value_error("Restore: thresholds/lut need a transform separation for ntsc");
+        if (level)
+            return avs_new_value_error("Restore: thresholds/lut and level are mutually exclusive");
+        if (dimensions == 1)
+            return avs_new_value_error("Restore: thresholds/lut need dimensions 2 or 3");
+        if (nlut > 0 && nthresh > 0)
+            return avs_new_value_error("Restore: lut and thresholds are mutually exclusive");
+        const int wl = dimensions == 2 ? COMP_T2D_NTHRESH
+                     : (standard == COMP_STD_PAL ? COMP_T3D_NTHRESH_PAL : COMP_T3D_NTHRESH);
+        if (nthresh > 0 && nthresh != wl)
+            return avs_new_value_error("Restore: thresholds has the wrong length for this mode");
+        if (nlut > 0 && nlut != wl * COMP_LUT_K)
+            return avs_new_value_error("Restore: lut has the wrong length for this mode");
+    }
+
+    /* stage 1: source -> 4xfsc raster (YUV444P16). This raster clip is
+     * both the encode input and the refine anchor, so it needs two
+     * independent references. */
+    int rwidth;
+    double fwd_left, fwd_width;
+    comp_encode_resample_params(standard, src_width, &rwidth, &fwd_left, &fwd_width);
+    AVS_Value raster = comp_avs_zresize(env, clip_v, "Restore", rwidth, in_h,
+                                        "YUV444P16", fwd_left, fwd_width);
+    if (avs_is_error(raster))
+        return raster;
+    AVS_Clip *anchor = avs_take_clip(raster, env); /* second, independent ref */
+
+    /* stage 2: encode filter over the raster picture -> GRAY16 composite */
+    AVS_FilterInfo *efi;
+    AVS_Clip *enc_clip = avs_new_c_filter(env, &efi, raster, 1);
+    avs_release_value(raster);
+    if (!enc_clip) {
+        avs_release_clip(anchor);
+        return avs_new_value_error("Restore: failed to create modulator");
+    }
+    comp_avs_t *ef = calloc(1, sizeof(*ef));
+    if (!ef) {
+        avs_release_clip(enc_clip);
+        avs_release_clip(anchor);
+        return avs_new_value_error("Restore: out of memory");
+    }
+    ef->standard = standard;
+    ef->height = efi->vi.height;
+    comp_encode_init(&ef->enc, standard, setup, precomb);
+    efi->vi.pixel_type = AVS_CS_Y16;
+    efi->get_frame = comp_avs_get_frame;
+    efi->set_cache_hints = comp_avs_set_cache_hints;
+    efi->free_filter = comp_avs_free;
+    efi->user_data = ef;
+
+    AVS_Value enc_v;
+    avs_set_to_clip(&enc_v, enc_clip);
+    avs_release_clip(enc_clip);
+
+    /* stage 3: decode filter over the composite, with the raster anchor */
+    AVS_FilterInfo *dfi;
+    AVS_Clip *dec_clip = avs_new_c_filter(env, &dfi, enc_v, 1);
+    avs_release_value(enc_v);
+    if (!dec_clip) {
+        avs_release_clip(anchor);
+        return avs_new_value_error("Restore: failed to create decoder");
+    }
+    comp_avs_dec_t *df = calloc(1, sizeof(*df));
+    if (!df) {
+        avs_release_clip(dec_clip);
+        avs_release_clip(anchor);
+        return avs_new_value_error("Restore: out of memory");
+    }
+    df->standard = standard;
+    df->height = in_h;
+    df->in_frames = dfi->vi.num_frames;
+    df->anchor = anchor; /* takes ownership of the second ref */
+    if (comp_decode_init(&df->dec, standard, threshold,
+                         comp_avs_num_threads(env), setup, dimensions, eq,
+                         refine, transform, level, evidence, cti)) {
+        free(df);
+        avs_release_clip(anchor);
+        avs_release_clip(dec_clip);
+        return avs_new_value_error("Restore: decoder initialisation failed");
+    }
+    const char *terr = comp_avs_install_tables(&df->dec, standard, dimensions,
+                                               thr_arr, nthresh, lut_arr, nlut,
+                                               builtin_lut);
+    if (terr) {
+        comp_decode_free(&df->dec);
+        avs_release_clip(anchor);
+        free(df);
+        avs_release_clip(dec_clip);
+        char msg[128];
+        snprintf(msg, sizeof(msg), "Restore: %s", terr);
+        return avs_new_value_error(msg);
+    }
+    dfi->vi.pixel_type = AVS_CS_YUV444P16;
+    dfi->get_frame = comp_avs_dec_get_frame;
+    dfi->set_cache_hints = comp_avs_dec_set_cache_hints;
+    dfi->free_filter = comp_avs_dec_free;
+    dfi->user_data = df;
+
     AVS_Value dec_v;
     avs_set_to_clip(&dec_v, dec_clip);
     avs_release_clip(dec_clip);
 
-    AVS_Value padded = comp_avs_pad_h(env, dec_v, "Decode");
+    /* stage 4: back to the caller's raster, then splice the un-modeled
+     * outer columns through from the source. */
+    AVS_Value restored = comp_avs_resample_back(env, dec_v, "Restore", standard,
+                                                width, in_h);
     avs_release_value(dec_v);
-    if (avs_is_error(padded))
-        return padded;
+    if (avs_is_error(restored))
+        return restored;
 
-    double dst_left, dst_width;
-    comp_decode_resample_params(standard, width, &dst_left, &dst_width);
-    /* the pad added COMP_EDGE_PAD columns on the left, already folded into
-     * dst_left by comp_decode_resample_params */
-    AVS_Value ret = comp_avs_zresize(env, padded, "Decode", width, in_h,
-                                     "YUV444P16", dst_left, dst_width);
-    avs_release_value(padded);
+    int nl, nr;
+    comp_decode_edge_columns(standard, width, rwidth, &nl, &nr);
+    if (nl == 0 && nr == 0)
+        return restored;
+
+    /* plain resize of the source to the output geometry for the spliced
+     * edge columns (no subpixel crop; matches the VS plugin) */
+    AVS_Value src444 = comp_avs_zresize(env, clip_v, "Restore", width, in_h,
+                                        "YUV444P16", 0.0 / 0.0, 0.0 / 0.0);
+    if (avs_is_error(src444)) {
+        avs_release_value(restored);
+        return src444;
+    }
+    AVS_Value ret = comp_avs_edge_splice(env, restored, src444, width, nl, nr);
+    avs_release_value(restored);
+    avs_release_value(src444);
     return ret;
 }
 
@@ -591,8 +934,13 @@ AVSC_EXPORT const char *AVSC_CC avisynth_c_plugin_init(AVS_ScriptEnvironment *en
                      comp_avs_create, NULL);
     avs_add_function(env, "composite_Decode",
                      "c[standard]s[width]i[threshold]f[setup]b[dimensions]i"
-                     "[eq]i[thresholds]f.[transform]i[level]i[lut]f."
+                     "[eq]i[thresholds]f+[transform]i[level]i[lut]f+"
                      "[evidence]f[cti]b",
                      comp_avs_dec_create, NULL);
+    avs_add_function(env, "composite_Restore",
+                     "c[standard]s[width]i[threshold]f[setup]b[dimensions]i"
+                     "[eq]i[refine]i[thresholds]f+[precomb]b[transform]i"
+                     "[level]i[lut]f+[evidence]f[cti]b",
+                     comp_avs_res_create, NULL);
     return "composite: PAL/NTSC composite video encoder/decoder";
 }
