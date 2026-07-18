@@ -25,7 +25,8 @@ threads_dep = dependency('threads')
 core_deps = [m_dep, fftw3f_dep, threads_dep]
 
 core_sources = files('src/subcarrier.c', 'src/encode.c', 'src/transform2d.c',
-                     'src/transform3d.c', 'src/fft.c', 'src/cpu.c')
+                     'src/transform3d.c', 'src/fft.c', 'src/cpu.c',
+                     'src/fir_row.c')
 
 if host_machine.cpu_family() == 'x86_64'
     add_languages('nasm', native: false)
