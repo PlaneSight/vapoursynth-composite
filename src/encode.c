@@ -35,11 +35,6 @@ static const int16_t uv_taps_ntsc[9] = {
 #define KB 0.49211104112248356308804691718185
 #define KR 0.87728321993817866838972487283129
 
-/* legal sample range, 10-bit levels in a 16-bit container (value << 6)
- * [EBU Tech 3280; SMPTE 244M] */
-#define LEVEL_MIN 0x0100
-#define LEVEL_MAX 0xFEFF
-
 static inline int32_t rdiv32(int64_t num, int32_t den)
 {
     return (int32_t)((num >= 0 ? num + den / 2 : num - den / 2) / den);
@@ -94,7 +89,49 @@ int comp_encode_init(comp_encode_t *e, int standard, int setup, int precomb)
     for (int j = 0; j < e->uv_ntaps; j++)
         e->uv_taps32[j] = e->uv_taps[j];
     e->fir_row = comp_get_fir_row_q15_fn(comp_cpu_detect());
+    e->mod_row = comp_get_encode_mod_row_fn(comp_cpu_detect());
     return 0;
+}
+
+static void encode_mod_row_c(uint16_t *dst, const int32_t *luma,
+                             const int32_t *uf, const int32_t *vf,
+                             int32_t ku, int32_t kv,
+                             const int32_t *s4, const int32_t *c4, int w)
+{
+    for (int x = 0; x < w; x++) {
+        const int32_t cu = (uf[x] * ku + 16384) >> 15;
+        const int32_t cv = (vf[x] * kv + 16384) >> 15;
+        const int32_t chroma = (cu * s4[x & 3] + cv * c4[x & 3] + 16384) >> 15;
+        const int32_t out = luma[x] + chroma;
+        dst[x] = (uint16_t)(out < COMP_LEVEL_MIN ? COMP_LEVEL_MIN :
+                            out > COMP_LEVEL_MAX ? COMP_LEVEL_MAX : out);
+    }
+}
+
+#if defined(__x86_64__)
+#define ENCODE_MOD_ROW_ASM(isa)                                             \
+    void comp_encode_mod_row_##isa(uint16_t *dst, const int32_t *luma,     \
+                                   const int32_t *uf, const int32_t *vf,    \
+                                   int32_t ku, int32_t kv,                  \
+                                   const int32_t *s4, const int32_t *c4,    \
+                                   int w)
+ENCODE_MOD_ROW_ASM(sse4);
+ENCODE_MOD_ROW_ASM(avx2);
+ENCODE_MOD_ROW_ASM(avx512);
+#endif
+
+comp_encode_mod_row_fn comp_get_encode_mod_row_fn(unsigned cpu)
+{
+#if defined(__x86_64__)
+    if (cpu & COMP_CPU_AVX512)
+        return comp_encode_mod_row_avx512;
+    if (cpu & COMP_CPU_AVX2)
+        return comp_encode_mod_row_avx2;
+    if (cpu & COMP_CPU_SSE41)
+        return comp_encode_mod_row_sse4;
+#endif
+    (void)cpu;
+    return encode_mod_row_c;
 }
 
 void comp_encode_line(const comp_encode_t *e, uint16_t *dst,
@@ -133,19 +170,15 @@ void comp_encode_line(const comp_encode_t *e, uint16_t *dst,
     const int32_t c4[4] = { sc.vswitch * cs, -sc.vswitch * sn,
                             -sc.vswitch * cs, sc.vswitch * sn };
 
+    /* the luma level-map keeps its per-sample divide (negligible in the
+     * profile) scalar; chroma = U sin(a) + V cos(a) Vsw [Clarke 3.1/3.3]
+     * plus the add and clamp are the vectorized pass */
+    int32_t luma[COMP_ACTIVE_WIDTH_PAL];
     for (int x = 0; x < w; x++) {
         const int32_t yl = srcy[x] - 4096;
-        const int32_t luma = e->level_black + rdiv32((int64_t)yl * e->luma_num, e->luma_den);
-
-        /* chroma = U sin(a) + V cos(a) Vsw [Clarke 3.1/3.3] */
-        const int32_t cu = (uf[x] * e->ku + 16384) >> 15;
-        const int32_t cv = (vf[x] * e->kv + 16384) >> 15;
-        const int32_t chroma = (cu * s4[x & 3] + cv * c4[x & 3] + 16384) >> 15;
-
-        const int32_t out = luma + chroma;
-        dst[x] = (uint16_t)(out < LEVEL_MIN ? LEVEL_MIN :
-                            out > LEVEL_MAX ? LEVEL_MAX : out);
+        luma[x] = e->level_black + rdiv32((int64_t)yl * e->luma_num, e->luma_den);
     }
+    e->mod_row(dst, luma, uf, vf, e->ku, e->kv, s4, c4, w);
 }
 
 void comp_encode_frame(const comp_encode_t *e, int frame, int rows, int row_off,
