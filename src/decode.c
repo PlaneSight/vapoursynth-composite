@@ -200,6 +200,10 @@ int comp_decode_init(comp_decode_t *d, int standard, double threshold,
     d->level_black = enc.level_black;
     d->luma_num = enc.luma_den;  /* the inverse slope */
     d->luma_den = enc.luma_num;
+    d->demod_quant_row = comp_get_demod_quant_row_fn(comp_cpu_detect());
+    comp_magic_init(&d->mag_y, d->luma_num, d->luma_den, 4096);
+    comp_magic_init(&d->mag_u, 32768, d->ku, 32768);
+    comp_magic_init(&d->mag_v, 32768, d->kv, 32768);
     memcpy(d->sin_q15, enc.sin_q15, sizeof(d->sin_q15));
 
     if (standard == COMP_STD_PAL && dimensions > 1) {
@@ -826,6 +830,71 @@ static void ntsc_comb2d(const comp_decode_t *d, int rows, const float *c1, float
 }
 
 
+/* Build the magic reciprocal for clamp_u16(base + rdiv(in * k, den)).
+ * rdiv is round-half-away, = sign(n) * floor((|n|*k + floor(den/2)) /
+ * den); the ratio k/den is magicked directly onto |n| at a fixed
+ * COMP_MAGIC_SHIFT (see D048). den and k are small positive constants,
+ * so ceil/round in int64 is exact. */
+void comp_magic_init(comp_magic_t *m, int32_t k, int32_t den, int32_t base)
+{
+    const int s = COMP_MAGIC_SHIFT;
+    const int64_t c = den / 2;
+    const uint64_t mul = ((uint64_t)k << s) / (uint64_t)den
+                       + (((uint64_t)k << s) % (uint64_t)den != 0);  /* ceil */
+    const uint64_t add = ((uint64_t)c << s) / (uint64_t)den
+                       + ((((uint64_t)c << s) % (uint64_t)den) * 2
+                          >= (uint64_t)den);                          /* round */
+    /* mul < 2^32 for every standard/setup; the asm loads it as a u32 */
+    m->mul = (uint32_t)mul;
+    m->add = (uint32_t)add;
+    m->base = base;
+}
+
+/* C reference for the dispatched output-quantize kernel; see decode.h.
+ * Terminal (writes a frame plane), so exactness is required only where
+ * clamp_u16 does not saturate -- the magic and rdiv agree there. */
+static void demod_quant_row_c(uint16_t *out, const int32_t *in,
+                              const comp_magic_t *mag, int w)
+{
+    for (int x = 0; x < w; x++) {
+        const int32_t n = in[x];
+        const uint32_t an = n < 0 ? (uint32_t)(-(int64_t)n) : (uint32_t)n;
+        const uint32_t q = (uint32_t)(((uint64_t)an * mag->mul + mag->add)
+                                      >> COMP_MAGIC_SHIFT);
+        const int32_t v = mag->base + (n < 0 ? -(int32_t)q : (int32_t)q);
+        out[x] = clamp_u16(v);
+    }
+}
+
+#if defined(__x86_64__)
+#define DEMOD_QUANT_ROW_ASM(isa)                                            \
+    void comp_demod_quant_row_##isa(uint16_t *out, const int32_t *in,       \
+                                    const comp_magic_t *mag, int w)
+DEMOD_QUANT_ROW_ASM(sse4);
+DEMOD_QUANT_ROW_ASM(avx2);
+DEMOD_QUANT_ROW_ASM(avx512);
+
+/* the asm indexes the magic struct with these offsets */
+_Static_assert(sizeof(comp_magic_t) == 12, "magic layout");
+_Static_assert(offsetof(comp_magic_t, mul) == 0, "magic layout");
+_Static_assert(offsetof(comp_magic_t, add) == 4, "magic layout");
+_Static_assert(offsetof(comp_magic_t, base) == 8, "magic layout");
+#endif
+
+comp_demod_quant_row_fn comp_get_demod_quant_row_fn(unsigned cpu)
+{
+#if defined(__x86_64__)
+    if (cpu & COMP_CPU_AVX512)
+        return comp_demod_quant_row_avx512;
+    if (cpu & COMP_CPU_AVX2)
+        return comp_demod_quant_row_avx2;
+    if (cpu & COMP_CPU_SSE41)
+        return comp_demod_quant_row_sse4;
+#endif
+    (void)cpu;
+    return demod_quant_row_c;
+}
+
 /* line phase parity, matching the reference's getLinePhase: the NTSC
  * subcarrier advances half a cycle per broadcast line, so the parity of
  * the line count within the color sequence selects one of the two
@@ -1060,7 +1129,8 @@ static void ntsc_demod_line(const comp_decode_t *d, int frame, int raster_row,
         }
     }
     for (int x = 0; x < w; x++)
-        outy[x] = clamp_u16(4096 + rdiv((int64_t)(yl_row[x] - d->level_black) * d->luma_num, d->luma_den));
+        yl_row[x] -= d->level_black;
+    d->demod_quant_row(outy, yl_row, &d->mag_y, w);
 
     int32_t *u_out = u_row, *v_out = v_row;
     if (d->eq) {
@@ -1089,10 +1159,8 @@ static void ntsc_demod_line(const comp_decode_t *d, int frame, int raster_row,
     if (d->cti)
         cti_row(outy, u_out, v_out, w);
 
-    for (int x = 0; x < w; x++) {
-        outu[x] = clamp_u16(32768 + rdiv((int64_t)u_out[x] * 32768, d->ku));
-        outv[x] = clamp_u16(32768 + rdiv((int64_t)v_out[x] * 32768, d->kv));
-    }
+    d->demod_quant_row(outu, u_out, &d->mag_u, w);
+    d->demod_quant_row(outv, v_out, &d->mag_v, w);
 }
 
 
