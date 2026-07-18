@@ -119,6 +119,19 @@ comp_demod_quant_row_fn comp_get_demod_quant_row_fn(unsigned cpu);
 /* build the magic triple for clamp_u16(base + rdiv(in * k, den)) */
 void comp_magic_init(comp_magic_t *m, int32_t k, int32_t den, int32_t base);
 
+/* NTSC chroma rotation onto the U/V axes (the comb.cpp demod step):
+ *   u[x] = -(p[x]*bp + q[x]*bq + 8192) >> 14
+ *   v[x] = -(q[x]*bp - p[x]*bq + 8192) >> 14
+ * with the burst-phase pair bp/bq (Q15) passed as a 2-int array to keep
+ * the asm ABI GPR-only. Byte-identical to the C reference (integer,
+ * associative). The kernel over-reads/-writes nothing past [w] (an
+ * overlapping final vector covers the ragged tail). */
+typedef void (*comp_demod_rotate_row_fn)(int32_t *u, int32_t *v,
+                                         const int32_t *p, const int32_t *q,
+                                         const int32_t *bpq, int w);
+
+comp_demod_rotate_row_fn comp_get_demod_rotate_row_fn(unsigned cpu);
+
 typedef struct comp_decode_scratch_t comp_decode_scratch_t;
 
 struct comp_decode_scratch_t {
@@ -165,6 +178,7 @@ struct comp_decode_t {
     comp_split3d_row_fn split3d_row;
     comp_ntsc_comb2d_row_fn comb2d_row;
     comp_demod_quant_row_fn demod_quant_row;
+    comp_demod_rotate_row_fn demod_rotate_row;
     comp_transform2d_t transform;
     comp_transform3d_t transform3;
     comp_t3d_cache_t t3cache;    /* 3D transform slab cache */

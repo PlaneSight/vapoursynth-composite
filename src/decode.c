@@ -201,6 +201,7 @@ int comp_decode_init(comp_decode_t *d, int standard, double threshold,
     d->luma_num = enc.luma_den;  /* the inverse slope */
     d->luma_den = enc.luma_num;
     d->demod_quant_row = comp_get_demod_quant_row_fn(comp_cpu_detect());
+    d->demod_rotate_row = comp_get_demod_rotate_row_fn(comp_cpu_detect());
     comp_magic_init(&d->mag_y, d->luma_num, d->luma_den, 4096);
     comp_magic_init(&d->mag_u, 32768, d->ku, 32768);
     comp_magic_init(&d->mag_v, 32768, d->kv, 32768);
@@ -895,6 +896,41 @@ comp_demod_quant_row_fn comp_get_demod_quant_row_fn(unsigned cpu)
     return demod_quant_row_c;
 }
 
+/* C reference for the dispatched NTSC chroma rotation; see decode.h. */
+static void demod_rotate_row_c(int32_t *u, int32_t *v, const int32_t *p,
+                               const int32_t *q, const int32_t *bpq, int w)
+{
+    const int32_t bp = bpq[0], bq = bpq[1];
+    for (int x = 0; x < w; x++) {
+        u[x] = (int32_t)(-((int64_t)p[x] * bp + (int64_t)q[x] * bq + 8192) >> 14);
+        v[x] = (int32_t)(-((int64_t)q[x] * bp - (int64_t)p[x] * bq + 8192) >> 14);
+    }
+}
+
+#if defined(__x86_64__)
+#define DEMOD_ROTATE_ROW_ASM(isa)                                           \
+    void comp_demod_rotate_row_##isa(int32_t *u, int32_t *v,                \
+                                     const int32_t *p, const int32_t *q,    \
+                                     const int32_t *bpq, int w)
+DEMOD_ROTATE_ROW_ASM(sse4);
+DEMOD_ROTATE_ROW_ASM(avx2);
+DEMOD_ROTATE_ROW_ASM(avx512);
+#endif
+
+comp_demod_rotate_row_fn comp_get_demod_rotate_row_fn(unsigned cpu)
+{
+#if defined(__x86_64__)
+    if (cpu & COMP_CPU_AVX512)
+        return comp_demod_rotate_row_avx512;
+    if (cpu & COMP_CPU_AVX2)
+        return comp_demod_rotate_row_avx2;
+    if (cpu & COMP_CPU_SSE41)
+        return comp_demod_rotate_row_sse4;
+#endif
+    (void)cpu;
+    return demod_rotate_row_c;
+}
+
 /* line phase parity, matching the reference's getLinePhase: the NTSC
  * subcarrier advances half a cycle per broadcast line, so the parity of
  * the line count within the color sequence selects one of the two
@@ -1085,8 +1121,7 @@ static void ntsc_demod_line(const comp_decode_t *d, int frame, int raster_row,
     const comp_sc_line_t sc = comp_sc_line(d->standard, frame, raster_row);
     const int32_t sn0 = d->sin_q15[sc.phase];
     const int32_t cs0 = d->sin_q15[(sc.phase + d->den / 4) % d->den];
-    const int32_t bp = -cs0;
-    const int32_t bq = -sn0;
+    const int32_t bpq[2] = { -cs0, -sn0 };  /* bp, bq */
     const int32_t s4[4] = { sn0, cs0, -sn0, -cs0 };
     const int32_t c4[4] = { cs0, -sn0, -cs0, sn0 };
 
@@ -1096,10 +1131,7 @@ static void ntsc_demod_line(const comp_decode_t *d, int frame, int raster_row,
     d->fir_row(p_row, m, colorlp_q15d, COLORLP_TAPS, w);
     d->fir_row(q_row, n, colorlp_q15d, COLORLP_TAPS, w);
 
-    for (int x = 0; x < w; x++) {
-        u_row[x] = (int32_t)(-((int64_t)p_row[x] * bp + (int64_t)q_row[x] * bq + 8192) >> 14);
-        v_row[x] = (int32_t)(-((int64_t)q_row[x] * bp - (int64_t)p_row[x] * bq + 8192) >> 14);
-    }
+    d->demod_rotate_row(u_row, v_row, p_row, q_row, bpq, w);
 
     /* comb mode follows comb.cpp adjustY (subtract the filtered chroma
      * resynthesized on the carrier, using the values before

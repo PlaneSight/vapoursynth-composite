@@ -80,28 +80,6 @@ SECTION .text
     psubd        %1, [d_sub22]
 %endmacro
 
-; packed i32 of (-(a*ca (sign_op) b*cb) - 8192) >> 14: the sum S is
-; subtracted from (1 << 40) - 8192 so the shift floors the NEGATED
-; value, matching the C reference's -(S + 8192) >> 14 exactly
-%macro ROTATE 6 ; out, a, ca, b, cb, sign_op (paddq/psubq)
-    pshufd       m14, %2, 0xF5
-    pmuldq       m14, %3
-    pshufd       m13, %4, 0xF5
-    pmuldq       m13, %5
-    %6           m14, m13
-    pmuldq       m12, %2, %3
-    pmuldq       m13, %4, %5
-    %6           m12, m13
-    mova         m13, [q_nbias14]
-    psubq        m15, m13, m12
-    psubq        m13, m14
-    psrlq        m15, 14
-    psrlq        m13, 14
-    psllq        m13, 32
-    BLEND_ODD    %1, m15, m13
-    psubd        %1, [d_sub26]
-%endmacro
-
 ; void pal_demod_row(int32_t *u, int32_t *v, const int32_t *m,
 ;                    const int32_t *n, ptrdiff_t stride,
 ;                    const int32_t *cf, int w, int32_t bp, int32_t bq,
