@@ -74,6 +74,26 @@ shared_module('composite',
     name_prefix: '',
 )
 
+# AviSynth+ frontend: a C-interface plugin against the vendored, pinned
+# avisynth_c.h (interface v12). It resolves the host avs_* symbols by
+# dynamic lookup at load time, so it does not link libavisynth on Linux;
+# shared_module allows the undefined symbols. It resamples through zimg
+# via avsresize (z_ConvertFormat), a runtime dependency the user installs.
+if get_option('avisynth')
+    avs_incdir = include_directories('third_party/avisynth')
+    # The C-API plugin entry point avisynth_c_plugin_init must be exported,
+    # but on non-Windows AVSC_EXPORT carries no visibility attribute, so
+    # 'hidden' default visibility would hide it. Keep default visibility;
+    # the plugin has no other symbols worth hiding.
+    shared_module('composite_avs',
+        files('src/composite_avs.c'),
+        dependencies: core_deps,
+        include_directories: avs_incdir,
+        install: true,
+        link_with: core,
+    )
+endif
+
 test('subcarrier', executable('test_subcarrier',
     files('test/test_subcarrier.c'),
     dependencies: core_deps,

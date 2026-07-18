@@ -1,1 +1,2 @@
 option('checkasm', type: 'feature', value: 'auto', description: 'Build the checkasm test tool')
+option('avisynth', type: 'boolean', value: false, description: 'Build the AviSynth+ plugin frontend')
