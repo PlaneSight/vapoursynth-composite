@@ -172,24 +172,12 @@ static int comp_parse_standard(const VSMap *in, const VSAPI *vsapi, int *standar
     return 0;
 }
 
-/* BT.601 horizontal anchors: the first active luma sample is 132 luma
- * clocks after 0H for 625-line systems and 122 for 525-line (BT.601-5
- * Part A). On the 0H-aligned 4xfsc raster the active window starts at
- * stored sample 182 (PAL) or 130 + 57/90 (NTSC, where 0H precedes
- * stored sample 0 by 57/90 of a sample). rho converts 4xfsc sample
- * counts into 13.5 MHz sample counts. */
-#define RHO_PAL  (540000.0 / 709379.0)
-#define RHO_NTSC (33.0 / 35.0)
-
-
-/* Horizontally pad a node with replicated edge columns. The final
- * BT.601 resample reads a few samples beyond the active raster (the
+/* Horizontally pad a node with COMP_EDGE_PAD replicated edge columns. The
+ * final BT.601 resample reads a few samples beyond the active raster (the
  * 601 window is wider in time), and zimg fills out-of-bounds taps by
  * MIRRORING, which reflects interior picture onto the frame edges;
- * replicated padding makes those taps read the edge value instead. */
-#define COMP_EDGE_PAD 24
-
-/* consumes the node reference, also on failure */
+ * replicated padding makes those taps read the edge value instead.
+ * consumes the node reference, also on failure */
 static VSNode *comp_pad_h(VSNode *node, VSCore *core, const VSAPI *vsapi)
 {
     VSPlugin *std = vsapi->getPluginByID("com.vapoursynth.std", core);
@@ -512,10 +500,8 @@ static void VS_CC comp_decode_create(const VSMap *in, VSMap *out, void *user_dat
     /* resample back to the BT.601 raster: the exact inverse of Encode's
      * mapping. The 601 window is wider in time than the active raster,
      * so the outermost samples come from replicated edge padding. */
-    const int pal = d.standard == COMP_STD_PAL;
-    const double rho = pal ? RHO_PAL : RHO_NTSC;
-    const double active0 = pal ? 182.0 : 130.0 + 57.0 / 90.0;
-    const double anchor601 = pal ? 132.0 : 122.0;
+    double dst_left, dst_width;
+    comp_decode_resample_params(d.standard, width, &dst_left, &dst_width);
     VSNode *padded = comp_pad_h(dec_node, core, vsapi);
     if (!padded) {
         vsapi->mapSetError(out, "Decode: edge padding failed");
@@ -525,10 +511,8 @@ static void VS_CC comp_decode_create(const VSMap *in, VSMap *out, void *user_dat
     vsapi->mapConsumeNode(args, "clip", padded, maReplace);
     vsapi->mapSetInt(args, "width", width, maReplace);
     vsapi->mapSetInt(args, "height", d.vi.height, maReplace);
-    vsapi->mapSetFloat(args, "src_left",
-                       COMP_EDGE_PAD + anchor601 / rho - (active0 - 0.5)
-                       - 0.5 * (720.0 / width) / rho, maReplace);
-    vsapi->mapSetFloat(args, "src_width", 720.0 / rho, maReplace);
+    vsapi->mapSetFloat(args, "src_left", dst_left, maReplace);
+    vsapi->mapSetFloat(args, "src_width", dst_width, maReplace);
     VSMap *ret = vsapi->invoke(resize, "Spline36", args);
     vsapi->freeMap(args);
 
@@ -678,14 +662,7 @@ static void VS_CC comp_restore_create(const VSMap *in, VSMap *out, void *user_da
     if (!resize)
         RETERROR("resize plugin not found");
 
-    /* stage 1: the picture on the 4xfsc raster (also the refine anchor).
-     * rho/active0/anchor601 are also used by the inverse mapping in
-     * stage 4 below; the forward crop comes from the shared helper. */
-    const int pal = d.standard == COMP_STD_PAL;
-    const double rho = pal ? RHO_PAL : RHO_NTSC;
-    const double active0 = pal ? 182.0 : 130.0 + 57.0 / 90.0;
-    const double anchor601 = pal ? 132.0 : 122.0;
-
+    /* stage 1: the picture on the 4xfsc raster (also the refine anchor) */
     int rwidth;
     double fwd_left, fwd_width;
     comp_encode_resample_params(d.standard, src_width, &rwidth, &fwd_left, &fwd_width);
@@ -811,14 +788,14 @@ static void VS_CC comp_restore_create(const VSMap *in, VSMap *out, void *user_da
         vsapi->mapSetError(out, "Restore: edge padding failed");
         return;
     }
+    double dst_left, dst_width;
+    comp_decode_resample_params(d.standard, width, &dst_left, &dst_width);
     args = vsapi->createMap();
     vsapi->mapConsumeNode(args, "clip", padded, maReplace);
     vsapi->mapSetInt(args, "width", width, maReplace);
     vsapi->mapSetInt(args, "height", d.vi.height, maReplace);
-    vsapi->mapSetFloat(args, "src_left",
-                       COMP_EDGE_PAD + anchor601 / rho - (active0 - 0.5)
-                       - 0.5 * (720.0 / width) / rho, maReplace);
-    vsapi->mapSetFloat(args, "src_width", 720.0 / rho, maReplace);
+    vsapi->mapSetFloat(args, "src_left", dst_left, maReplace);
+    vsapi->mapSetFloat(args, "src_width", dst_width, maReplace);
     ret = vsapi->invoke(resize, "Spline36", args);
     vsapi->freeMap(args);
 
@@ -837,14 +814,8 @@ static void VS_CC comp_restore_create(const VSMap *in, VSMap *out, void *user_da
     /* the outermost output columns sample beyond the active raster and
      * cannot be reconstructed from it — they never rode the modeled
      * channel. Splice them through from the source instead. */
-    const double s_left = anchor601 / rho - (active0 - 0.5)
-                          - 0.5 * (720.0 / width) / rho;
-    const double step = (720.0 / rho) / width;
-    int nl = 0, nr = 0;
-    while (nl < width && s_left + (nl + 0.5) * step < -0.5)
-        nl++;
-    while (nr < width && s_left + (width - nr - 0.5) * step > rwidth - 0.5)
-        nr++;
+    int nl, nr;
+    comp_decode_edge_columns(d.standard, width, rwidth, &nl, &nr);
     if (nl > 0 || nr > 0) {
         VSPlugin *std = vsapi->getPluginByID("com.vapoursynth.std", core);
         args = vsapi->createMap();
