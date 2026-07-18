@@ -22,6 +22,7 @@
 #include <stdlib.h>
 #include <string.h>
 
+#include "clamp.h"
 #include "cpu.h"
 #include "decode.h"
 #include "encode.h"
@@ -503,11 +504,6 @@ static inline int32_t rdiv(int64_t num, int32_t den)
 static inline uint16_t clamp_u16(int32_t v)
 {
     return (uint16_t)(v < 0 ? 0 : v > 65535 ? 65535 : v);
-}
-
-static inline int16_t clamp_i16(long v)
-{
-    return (int16_t)(v < -32768 ? -32768 : v > 32767 ? 32767 : v);
 }
 
 /* Demodulate one PAL field. comp and chroma are field views; the output
@@ -1377,6 +1373,10 @@ void comp_decode_frame(comp_decode_t *d, int frame, int nframes,
                                        s->chroma_f + field * w, 2 * w,
                                        s->conf ? s->conf + field * w : NULL, 2 * w);
             }
+            /* quantise the separated chroma for the fixed-point demod;
+             * the 3D path below quantises inside the frame sum instead */
+            for (int i = 0; i < w * rows; i++)
+                s->chroma[i] = clamp_i16(lrintf(s->chroma_f[i]));
         } else {
             /* build the field stack the covering 3D tiles need; the
              * views are edge-clamped frames, so out-of-clip fields
@@ -1405,13 +1405,9 @@ void comp_decode_frame(comp_decode_t *d, int frame, int nframes,
             comp_transform3d_frame(&d->transform3, &d->t3cache,
                                    fields, z0, nfields,
                                    frame, 0, w, frows,
-                                   s->chroma_f, s->chroma_f + w, 2 * w,
-                                   s->conf, s->conf ? s->conf + w : NULL);
+                                   s->chroma, s->chroma + w, 2 * w,
+                                   s->conf, s->conf ? s->conf + w : NULL, 2 * w);
         }
-
-        /* quantise the separated chroma once for the fixed-point demod */
-        for (int i = 0; i < w * rows; i++)
-            s->chroma[i] = clamp_i16(lrintf(s->chroma_f[i]));
 
         for (int field = 0; field < 2; field++) {
             pal_decode_field(d, frame, field,
@@ -1446,10 +1442,8 @@ void comp_decode_frame(comp_decode_t *d, int frame, int nframes,
             comp_transform3d_frame(&d->transform3, &d->t3cache,
                                    fields, z0, nfields,
                                    frame, parity, w, rows / 2,
-                                   s->chroma_f, s->chroma_f + w, 2 * w,
-                                   s->conf, s->conf ? s->conf + w : NULL);
-            for (int i = 0; i < w * rows; i++)
-                s->chroma[i] = clamp_i16(lrintf(s->chroma_f[i]));
+                                   s->chroma, s->chroma + w, 2 * w,
+                                   s->conf, s->conf ? s->conf + w : NULL, 2 * w);
 
             if (d->use_transform == 2) {
                 /* the hybrid: run the adaptive comb on the center three

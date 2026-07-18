@@ -181,14 +181,18 @@ void comp_t3d_cache_free(comp_t3d_cache_t *c);
  * slab's content is the same whichever frame builds it. parity gives
  * the raster row parity of even (temporally first) fields: 0 for PAL;
  * NTSC's first field sits on odd rows at row offsets 0/4 and even rows
- * at offset 5. chroma0/chroma1 are the row-parity field buffers
- * matching the raster layout. conf0/conf1, when non-NULL, receive
- * [0,1] chroma-confidence maps (same layout and stride as the chroma
- * buffers). width and field_rows must not exceed the cache capacity. */
+ * at offset 5. chroma0/chroma1 are the row-parity field buffers matching
+ * the raster layout: the two covering slabs are summed and quantised to
+ * int16 in one pass, so the demod's fixed-point input needs no separate
+ * float staging. chroma_stride is in int16 elements. conf0/conf1, when
+ * non-NULL, receive [0,1] chroma-confidence maps (float, same layout,
+ * stride conf_stride floats). width and field_rows must not exceed the
+ * cache capacity. */
 void comp_transform3d_frame(const comp_transform3d_t *t, comp_t3d_cache_t *c,
                             const comp_field_view_t *fields, int z0, int nfields,
                             int frame, int parity, int width, int field_rows,
-                            float *chroma0, float *chroma1, ptrdiff_t chroma_stride,
-                            float *conf0, float *conf1);
+                            int16_t *chroma0, int16_t *chroma1,
+                            ptrdiff_t chroma_stride,
+                            float *conf0, float *conf1, ptrdiff_t conf_stride);
 
 #endif

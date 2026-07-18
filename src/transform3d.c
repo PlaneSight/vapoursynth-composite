@@ -35,6 +35,7 @@
 #include <stdlib.h>
 #include <string.h>
 
+#include "clamp.h"
 #include "cpu.h"
 #include "fft.h"
 #include "osdep.h"
@@ -1010,10 +1011,11 @@ static void build_slab_pal(const comp_transform3d_t *t, comp_t3d_slab_t *s,
 void comp_transform3d_frame(const comp_transform3d_t *t, comp_t3d_cache_t *c,
                             const comp_field_view_t *fields, int z0, int nfields,
                             int frame, int parity, int width, int field_rows,
-                            float *chroma0, float *chroma1, ptrdiff_t chroma_stride,
-                            float *conf0, float *conf1)
+                            int16_t *chroma0, int16_t *chroma1,
+                            ptrdiff_t chroma_stride,
+                            float *conf0, float *conf1, ptrdiff_t conf_stride)
 {
-    float *chroma[2] = { chroma0, chroma1 };
+    int16_t *chroma[2] = { chroma0, chroma1 };
     float *conf[2] = { conf0, conf1 };
     const int fout = frame * 2;
 
@@ -1049,17 +1051,21 @@ void comp_transform3d_frame(const comp_transform3d_t *t, comp_t3d_cache_t *c,
         const int g = fout + f;
         const float *p1 = s1->chroma + (g - s1->tz) * plane;
         const float *p2 = s2->chroma + (g - s2->tz) * plane;
-        float *dc = chroma[f ^ parity];
+        int16_t *dc = chroma[f ^ parity];
         float *dw = conf[f ^ parity];
+        /* sum the two covering slabs and quantise to the demod's
+         * fixed-point input in one pass -- the float sum is never
+         * spilled to a frame plane the demod would re-read */
         for (int r = 0; r < field_rows; r++)
             for (int x = 0; x < width; x++)
-                dc[r * chroma_stride + x] = p1[r * width + x] + p2[r * width + x];
+                dc[r * chroma_stride + x] =
+                    clamp_i16(lrintf(p1[r * width + x] + p2[r * width + x]));
         if (dw) {
             const float *q1 = s1->conf + (g - s1->tz) * plane;
             const float *q2 = s2->conf + (g - s2->tz) * plane;
             for (int r = 0; r < field_rows; r++)
                 for (int x = 0; x < width; x++)
-                    dw[r * chroma_stride + x] = q1[r * width + x] + q2[r * width + x];
+                    dw[r * conf_stride + x] = q1[r * width + x] + q2[r * width + x];
         }
     }
 
