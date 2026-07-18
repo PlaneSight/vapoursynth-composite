@@ -15,6 +15,7 @@
 
 #include "decode.h"
 #include "encode.h"
+#include "geom.h"
 #include "lut_tables.h"
 #include "subcarrier.h"
 
@@ -180,11 +181,6 @@ static int comp_parse_standard(const VSMap *in, const VSAPI *vsapi, int *standar
 #define RHO_PAL  (540000.0 / 709379.0)
 #define RHO_NTSC (33.0 / 35.0)
 
-static int comp_encode_width(int standard)
-{
-    return standard == COMP_STD_PAL ? COMP_ACTIVE_WIDTH_PAL : COMP_ACTIVE_WIDTH_NTSC;
-}
-
 
 /* Horizontally pad a node with replicated edge columns. The final
  * BT.601 resample reads a few samples beyond the active raster (the
@@ -278,12 +274,9 @@ static void VS_CC comp_encode_create(const VSMap *in, VSMap *out, void *user_dat
     if (!resize)
         RETERROR("resize plugin not found");
 
-    const int pal = d.standard == COMP_STD_PAL;
-    const int width = comp_encode_width(d.standard);
-    const double rho = pal ? RHO_PAL : RHO_NTSC;
-    const double active0 = pal ? 182.0 : 130.0 + 57.0 / 90.0;
-    const double anchor601 = pal ? 132.0 : 122.0;
-    const double scale = d.vi.width / 720.0;
+    int width;
+    double src_left, src_width;
+    comp_encode_resample_params(d.standard, d.vi.width, &width, &src_left, &src_width);
 
     VSMap *args = vsapi->createMap();
     vsapi->mapConsumeNode(args, "clip", d.node, maReplace);
@@ -291,9 +284,8 @@ static void VS_CC comp_encode_create(const VSMap *in, VSMap *out, void *user_dat
     vsapi->mapSetInt(args, "format", pfYUV444P16, maReplace);
     vsapi->mapSetInt(args, "width", width, maReplace);
     vsapi->mapSetInt(args, "height", d.vi.height, maReplace);
-    vsapi->mapSetFloat(args, "src_left",
-                       scale * ((active0 - 0.5) * rho - anchor601) + 0.5, maReplace);
-    vsapi->mapSetFloat(args, "src_width", scale * (width * rho), maReplace);
+    vsapi->mapSetFloat(args, "src_left", src_left, maReplace);
+    vsapi->mapSetFloat(args, "src_width", src_width, maReplace);
     VSMap *ret = vsapi->invoke(resize, "Spline36", args);
     vsapi->freeMap(args);
 
@@ -686,13 +678,17 @@ static void VS_CC comp_restore_create(const VSMap *in, VSMap *out, void *user_da
     if (!resize)
         RETERROR("resize plugin not found");
 
-    /* stage 1: the picture on the 4xfsc raster (also the refine anchor) */
+    /* stage 1: the picture on the 4xfsc raster (also the refine anchor).
+     * rho/active0/anchor601 are also used by the inverse mapping in
+     * stage 4 below; the forward crop comes from the shared helper. */
     const int pal = d.standard == COMP_STD_PAL;
-    const int rwidth = comp_encode_width(d.standard);
     const double rho = pal ? RHO_PAL : RHO_NTSC;
     const double active0 = pal ? 182.0 : 130.0 + 57.0 / 90.0;
     const double anchor601 = pal ? 132.0 : 122.0;
-    const double scale = src_width / 720.0;
+
+    int rwidth;
+    double fwd_left, fwd_width;
+    comp_encode_resample_params(d.standard, src_width, &rwidth, &fwd_left, &fwd_width);
 
     VSNode *source = vsapi->addNodeRef(d.node);
     VSMap *args = vsapi->createMap();
@@ -701,9 +697,8 @@ static void VS_CC comp_restore_create(const VSMap *in, VSMap *out, void *user_da
     vsapi->mapSetInt(args, "format", pfYUV444P16, maReplace);
     vsapi->mapSetInt(args, "width", rwidth, maReplace);
     vsapi->mapSetInt(args, "height", d.vi.height, maReplace);
-    vsapi->mapSetFloat(args, "src_left",
-                       scale * ((active0 - 0.5) * rho - anchor601) + 0.5, maReplace);
-    vsapi->mapSetFloat(args, "src_width", scale * (rwidth * rho), maReplace);
+    vsapi->mapSetFloat(args, "src_left", fwd_left, maReplace);
+    vsapi->mapSetFloat(args, "src_width", fwd_width, maReplace);
     VSMap *ret = vsapi->invoke(resize, "Spline36", args);
     vsapi->freeMap(args);
 
