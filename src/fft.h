@@ -29,9 +29,6 @@
  * the vector passes work on whole registers; columns NCOL..7 are zero */
 #define COMP_FFT_ROWSTRIDE COMP_T3D_XTILE
 
-typedef void (*comp_fft_fwd_fn)(float *band, const float *real);
-typedef void (*comp_fft_inv_fn)(float *real, float *band);
-
 comp_fft_fwd_fn comp_get_fft_fwd_fn(int standard, unsigned cpu);
 comp_fft_inv_fn comp_get_fft_inv_fn(int standard, unsigned cpu);
 

@@ -74,6 +74,17 @@ typedef void (*comp_t3d_apply_fn)(float *out, const float *in, const float *g,
 comp_t3d_mag_fn comp_get_t3d_mag_fn(unsigned cpu);
 comp_t3d_apply_fn comp_get_t3d_apply_fn(unsigned cpu);
 
+/* internal-FFT entry points (see fft.h); stored here so the filter
+ * can route per tile without an include cycle */
+typedef void (*comp_fft_fwd_fn)(float *band, const float *real);
+typedef void (*comp_fft_inv_fn)(float *real, float *band);
+
+typedef struct {
+    int bin;      /* linear bin index */
+    int32_t off;  /* float offset of the bin in the tile */
+    int keep;
+} comp_t3d_special_t;
+
 typedef struct comp_transform3d_t comp_transform3d_t;
 
 struct comp_transform3d_t {
@@ -96,12 +107,15 @@ struct comp_transform3d_t {
      * self-column special bins (kept carriers / discarded non-carriers
      * at x = XTILE/4, where the bin is its own reflection) */
     int32_t rowpair[COMP_T3D_NROWS][2];
-    struct {
-        int bin;      /* linear bin index */
-        int32_t off;  /* float offset of the bin in the tile */
-        int keep;
-    } special[8];
+    comp_t3d_special_t special[8];
     int nspecial;
+    /* the same tables for the internal FFT's band layout: packed
+     * 64-byte rows at bit-reversed (ky, kz); fft_fwd/fft_inv are the
+     * avx2 transforms, NULL when the FFTW path must be used */
+    int32_t rowpair_fft[COMP_T3D_NROWS][2];
+    comp_t3d_special_t special_fft[8];
+    comp_fft_fwd_fn fft_fwd;
+    comp_fft_inv_fn fft_inv;
 };
 
 /* PAL chroma on the displaced lattice is symmetric about the measured

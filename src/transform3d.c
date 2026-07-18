@@ -36,6 +36,7 @@
 #include <string.h>
 
 #include "cpu.h"
+#include "fft.h"
 #include "osdep.h"
 #include "subcarrier.h"
 #include "transform3d.h"
@@ -59,6 +60,17 @@
 
 #define LEVEL_BLACK 16384.0f
 
+/* per-tile frequency buffer: the FFTW layout and the internal FFT's
+ * packed band share the storage */
+union t3d_freq {
+    fftwf_complex cplx[TILE_CPLX];
+    float band[ZTILE * YTILE * COMP_FFT_ROWSTRIDE];
+};
+union t3d_freq_pal {
+    fftwf_complex cplx[TILE_CPLX_PAL];
+    float band[ZTILE * YTILE_PAL * COMP_FFT_ROWSTRIDE];
+};
+
 /* FFTW's planner is not thread-safe; execute-with-new-arrays is */
 static pthread_mutex_t planner_lock = PTHREAD_MUTEX_INITIALIZER;
 
@@ -81,6 +93,15 @@ int comp_transform3d_init(comp_transform3d_t *t, double threshold, int standard,
     t->lut_gain = comp_get_lut_gain_fn(comp_cpu_detect());
     t->t3d_mag = comp_get_t3d_mag_fn(comp_cpu_detect());
     t->t3d_apply = comp_get_t3d_apply_fn(comp_cpu_detect());
+    if (comp_cpu_detect() & COMP_CPU_AVX2) {
+        t->fft_fwd = comp_get_fft_fwd_fn(standard, comp_cpu_detect());
+        t->fft_inv = comp_get_fft_inv_fn(standard, comp_cpu_detect());
+    } else {
+        /* the C transform loses to FFTW; without the avx2 tier the
+         * FFTW path stays in use */
+        t->fft_fwd = NULL;
+        t->fft_inv = NULL;
+    }
     t3d_build_tables(t);
     const int ytile = standard == COMP_STD_PAL ? YTILE_PAL : YTILE;
     for (int i = 0; i < COMP_T3D_NTHRESH; i++)
@@ -151,11 +172,20 @@ void comp_t3d_rowpair(int standard, int32_t (*rows)[2])
     }
 }
 
+static int bitrev(int v, int bits)
+{
+    int r = 0;
+    for (int b = 0; b < bits; b++)
+        r = (r << 1) | ((v >> b) & 1);
+    return r;
+}
+
 static void t3d_build_tables(comp_transform3d_t *t)
 {
     const int pal = t->standard == COMP_STD_PAL;
     const int yt = pal ? YTILE_PAL : YTILE;
-    int bin = 0;
+    const int ybits = pal ? 4 : 5;
+    int bin = 0, i = 0;
 
     comp_t3d_rowpair(t->standard, t->rowpair);
     t->nspecial = 0;
@@ -164,6 +194,17 @@ static void t3d_build_tables(comp_transform3d_t *t)
             const int y_ref = ((yt / 2) + yt - y) % yt;
             const int z_ref = pal ? (ZTILE - z) % ZTILE
                                   : ((ZTILE / 2) + ZTILE - z) % ZTILE;
+
+            /* the internal FFT's band layout: packed 64-byte rows at
+             * bit-reversed (ky, kz); same natural bin walk, so the
+             * LUT indexing and visit order are unchanged */
+            t->rowpair_fft[i][0] =
+                (bitrev(z, 3) * yt + bitrev(y, ybits)) * COMP_FFT_ROWSTRIDE;
+            t->rowpair_fft[i][1] =
+                (bitrev(z_ref, 3) * yt + bitrev(y_ref, ybits))
+                * COMP_FFT_ROWSTRIDE + (COMP_T3D_XTILE / 4 - COMP_T3D_XTILE / 8) * 2;
+            i++;
+
             const int keep = pal
                 ? (y == y_ref && z == z_ref)
                 : ((y == YTILE / 4 && z == ZTILE / 4)
@@ -176,6 +217,11 @@ static void t3d_build_tables(comp_transform3d_t *t)
                 t->special[t->nspecial].bin = bin + 2;
                 t->special[t->nspecial].off = ((z * yt + y) * XC + XTILE / 4) * 2;
                 t->special[t->nspecial].keep = keep;
+                t->special_fft[t->nspecial].bin = bin + 2;
+                t->special_fft[t->nspecial].off =
+                    (bitrev(z, 3) * yt + bitrev(y, ybits)) * COMP_FFT_ROWSTRIDE
+                    + (XTILE / 4 - XTILE / 8) * 2;
+                t->special_fft[t->nspecial].keep = keep;
                 t->nspecial++;
             }
         }
@@ -313,7 +359,10 @@ comp_t3d_apply_fn comp_get_t3d_apply_fn(unsigned cpu)
  * written twice and the later visit must win; the confidence sums are
  * float accumulation, where order changes the result. */
 static float apply_filter_lut(const comp_transform3d_t *t,
-                              const fftwf_complex *in, fftwf_complex *out)
+                              const float *in, float *out,
+                              const int32_t (*rows)[2],
+                              const comp_t3d_special_t *sp,
+                              size_t out_floats)
 {
     const int pal = t->standard == COMP_STD_PAL;
     const int yt = pal ? YTILE_PAL : YTILE;
@@ -326,12 +375,14 @@ static float apply_filter_lut(const comp_transform3d_t *t,
     float e_num[COMP_T3D_NTHRESH], e_den[COMP_T3D_NTHRESH];
     float conf_num = 0.0f, conf_den = 0.0f;
 
-    memset(out, 0, sizeof(fftwf_complex) * ZTILE * yt * XC);
+    memset(out, 0, sizeof(float) * out_floats);
 
-    t->t3d_mag(m_in, m_ref, (const float *)in, t->rowpair, nrows);
+    t->t3d_mag(m_in, m_ref, in, rows, nrows);
     t->lut_gain(g, r, m_in, m_ref, t->lut, nbins);
 
-    /* LF-luma evidence scales the gains per bin (PAL option) */
+    /* LF-luma evidence scales the gains per bin (PAL option). The
+     * lookups address the FFTW tile layout; the internal-FFT path is
+     * gated off when evidence is enabled. */
     if (pal && t->evidence > 0.0f) {
         static const int cy[2] = { 12, 4 };
         int bin = 0;
@@ -340,11 +391,11 @@ static float apply_filter_lut(const comp_transform3d_t *t,
                 for (int x = XTILE / 8; x <= XTILE / 4; x++, bin++) {
                     float e = 0.0f;
                     for (int c = 0; c < 2; c++) {
-                        const fftwf_complex *lf =
-                            in + (((4 - z + ZTILE) % ZTILE) * yt
-                                  + (cy[c] - y + yt) % yt) * XC
-                               + (XTILE / 4) - x;
-                        const float ec = (*lf)[0] * (*lf)[0] + (*lf)[1] * (*lf)[1];
+                        const float *lf =
+                            in + ((((4 - z + ZTILE) % ZTILE) * yt
+                                   + (cy[c] - y + yt) % yt) * XC
+                                  + (XTILE / 4) - x) * 2;
+                        const float ec = lf[0] * lf[0] + lf[1] * lf[1];
                         e = ec > e ? ec : e;
                     }
                     const float hi = m_in[bin] > m_ref[bin] ? m_in[bin]
@@ -365,8 +416,8 @@ static float apply_filter_lut(const comp_transform3d_t *t,
         e_den[i] = e;
     }
     for (int s = 0; s < t->nspecial; s++) {
-        const int b = t->special[s].bin;
-        if (t->special[s].keep) {
+        const int b = sp[s].bin;
+        if (sp[s].keep) {
             g[b] = 1.0f;
             e_num[b] = m_in[b];
             e_den[b] = m_in[b];
@@ -376,14 +427,14 @@ static float apply_filter_lut(const comp_transform3d_t *t,
         }
     }
 
-    t->t3d_apply((float *)out, (const float *)in, g, t->rowpair, nrows);
+    t->t3d_apply(out, in, g, rows, nrows);
 
     /* discarded self-column bins stay zero; both their writers are
      * themselves discards, so a post-pass restores the memset state */
     for (int s = 0; s < t->nspecial; s++) {
-        if (!t->special[s].keep) {
-            ((float *)out)[t->special[s].off + 0] = 0.0f;
-            ((float *)out)[t->special[s].off + 1] = 0.0f;
+        if (!sp[s].keep) {
+            out[sp[s].off + 0] = 0.0f;
+            out[sp[s].off + 1] = 0.0f;
         }
     }
 
@@ -774,8 +825,9 @@ static void build_slab_ntsc(const comp_transform3d_t *t, comp_t3d_slab_t *s,
                             int width, int field_rows)
 {
     ALIGNED_32( float real[TILE_REAL] );
-    ALIGNED_32( fftwf_complex cplx_in[TILE_CPLX] );
-    ALIGNED_32( fftwf_complex cplx_out[TILE_CPLX] );
+    ALIGNED_32( union t3d_freq cplx_in );
+    ALIGNED_32( union t3d_freq cplx_out );
+    const int use_fft = t->fft_fwd && t->use_lut && t->evidence == 0.0f;
     const int frame_lines = field_rows * 2;
     const int tz = s->tz;
     const int parity = s->parity;
@@ -822,12 +874,22 @@ static void build_slab_ntsc(const comp_transform3d_t *t, comp_t3d_slab_t *s,
                         dst[x] = LEVEL_BLACK * win[x];
                 }
             }
-            fftwf_execute_dft_r2c(t->forward, real, cplx_in);
-
-            const float w = t->use_lut ? apply_filter_lut(t, cplx_in, cplx_out)
-                                       : apply_filter_ntsc(t, cplx_in, cplx_out);
-
-            fftwf_execute_dft_c2r(t->inverse, cplx_out, real);
+            float w;
+            if (use_fft) {
+                t->fft_fwd(cplx_in.band, real);
+                w = apply_filter_lut(t, cplx_in.band, cplx_out.band,
+                                     t->rowpair_fft, t->special_fft,
+                                     ZTILE * YTILE * COMP_FFT_ROWSTRIDE);
+                t->fft_inv(real, cplx_out.band);
+            } else {
+                fftwf_execute_dft_r2c(t->forward, real, cplx_in.cplx);
+                w = t->use_lut
+                    ? apply_filter_lut(t, (const float *)cplx_in.cplx,
+                                       (float *)cplx_out.cplx, t->rowpair,
+                                       t->special, 2 * TILE_CPLX)
+                    : apply_filter_ntsc(t, cplx_in.cplx, cplx_out.cplx);
+                fftwf_execute_dft_c2r(t->inverse, cplx_out.cplx, real);
+            }
 
             /* the confidence uses the same unity-sum window weights */
             for (int z = 0; z < ZTILE; z++) {
@@ -863,8 +925,9 @@ static void build_slab_pal(const comp_transform3d_t *t, comp_t3d_slab_t *s,
                            int width, int field_rows)
 {
     ALIGNED_32( float real[TILE_REAL_PAL] );
-    ALIGNED_32( fftwf_complex cplx_in[TILE_CPLX_PAL] );
-    ALIGNED_32( fftwf_complex cplx_out[TILE_CPLX_PAL] );
+    ALIGNED_32( union t3d_freq_pal cplx_in );
+    ALIGNED_32( union t3d_freq_pal cplx_out );
+    const int use_fft = t->fft_fwd && t->use_lut && t->evidence == 0.0f;
     const int tz = s->tz;
     const size_t plane = (size_t)field_rows * width;
 
@@ -904,12 +967,22 @@ static void build_slab_pal(const comp_transform3d_t *t, comp_t3d_slab_t *s,
                         dst[x] = LEVEL_BLACK * win[x];
                 }
             }
-            fftwf_execute_dft_r2c(t->forward, real, cplx_in);
-
-            const float w = t->use_lut ? apply_filter_lut(t, cplx_in, cplx_out)
-                                       : apply_filter_pal(t, cplx_in, cplx_out);
-
-            fftwf_execute_dft_c2r(t->inverse, cplx_out, real);
+            float w;
+            if (use_fft) {
+                t->fft_fwd(cplx_in.band, real);
+                w = apply_filter_lut(t, cplx_in.band, cplx_out.band,
+                                     t->rowpair_fft, t->special_fft,
+                                     ZTILE * YTILE_PAL * COMP_FFT_ROWSTRIDE);
+                t->fft_inv(real, cplx_out.band);
+            } else {
+                fftwf_execute_dft_r2c(t->forward, real, cplx_in.cplx);
+                w = t->use_lut
+                    ? apply_filter_lut(t, (const float *)cplx_in.cplx,
+                                       (float *)cplx_out.cplx, t->rowpair,
+                                       t->special, 2 * TILE_CPLX_PAL)
+                    : apply_filter_pal(t, cplx_in.cplx, cplx_out.cplx);
+                fftwf_execute_dft_c2r(t->inverse, cplx_out.cplx, real);
+            }
 
             for (int z = 0; z < ZTILE; z++) {
                 const int sz = (z + 1) / 2;
