@@ -86,7 +86,7 @@ if get_option('avisynth')
     # 'hidden' default visibility would hide it. Keep default visibility;
     # the plugin has no other symbols worth hiding.
     shared_module('composite_avs',
-        files('src/composite_avs.c'),
+        files('src/composite_avs.c', 'src/lut_tables.c'),
         dependencies: core_deps,
         include_directories: avs_incdir,
         install: true,
