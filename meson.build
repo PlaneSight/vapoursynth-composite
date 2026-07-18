@@ -25,7 +25,8 @@ threads_dep = dependency('threads')
 core_deps = [m_dep, fftw3f_dep, threads_dep]
 
 core_sources = files('src/subcarrier.c', 'src/encode.c', 'src/transform2d.c',
-                     'src/transform3d.c', 'src/decode.c', 'src/cpu.c')
+                     'src/transform3d.c', 'src/fft.c', 'src/decode.c',
+                     'src/cpu.c')
 
 if host_machine.cpu_family() == 'x86_64'
     add_languages('nasm', native: false)
@@ -74,6 +75,13 @@ test('encode', executable('test_encode',
 test('transform2d', executable('test_transform2d',
     files('test/test_transform2d.c'),
     dependencies: core_deps + dependency('fftw3'),
+    include_directories: include_directories('src'),
+    link_with: core,
+))
+
+test('fft', executable('test_fft',
+    files('test/test_fft.c'),
+    dependencies: core_deps,
     include_directories: include_directories('src'),
     link_with: core,
 ))
