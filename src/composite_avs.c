@@ -7,8 +7,10 @@
  * z_ConvertFormat, the same resampler VapourSynth uses) and sharing the
  * geometry with the VS plugin via geom.c so both produce the same raster.
  *
- * This is a C-interface plugin: it exports avisynth_c_plugin_init and
- * resolves the avs_* API by ordinary dynamic linking against the host.
+ * This is the AviSynth+ C-interface half of a dual-host module: the same
+ * binary also exports VapourSynthPluginInit2 (composite.c), and each host
+ * looks up only the entry point it knows. The avs_* API resolves by
+ * ordinary dynamic linking against the host.
  */
 
 #include <stdio.h>
@@ -929,6 +931,13 @@ static AVS_Value AVSC_CC comp_avs_res_create(AVS_ScriptEnvironment *env,
     return ret;
 }
 
+/* The module is built with hidden default visibility (for the
+ * VapourSynth side), and on non-Windows AVSC_EXPORT carries no
+ * visibility attribute of its own, so the host would not find this
+ * entry point without an explicit one. */
+#if defined(__GNUC__) && !defined(_WIN32)
+__attribute__((visibility("default")))
+#endif
 AVSC_EXPORT const char *AVSC_CC avisynth_c_plugin_init(AVS_ScriptEnvironment *env)
 {
     avs_add_function(env, "composite_Encode",
