@@ -4,7 +4,11 @@
 #include <stddef.h>
 #include <stdint.h>
 
+#include "fir_row.h"
 #include "subcarrier.h"
+
+/* the wider of the two U/V low-pass lengths (PAL's 13; NTSC's is 9) */
+#define COMP_UV_MAXTAPS 13
 
 typedef struct comp_encode_t comp_encode_t;
 
@@ -15,6 +19,8 @@ struct comp_encode_t {
     int precomb;
     const int16_t *uv_taps;
     int uv_ntaps;
+    int32_t uv_taps32[COMP_UV_MAXTAPS]; /* uv_taps widened for the kernel */
+    comp_fir_row_q15_fn fir_row;
     int32_t ku, kv;              /* chroma level per Cb/Cr LSB, Q15 */
     int32_t level_black;
     int32_t luma_num, luma_den;  /* level = black + (y - 4096) * num/den */

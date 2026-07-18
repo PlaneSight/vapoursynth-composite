@@ -9,8 +9,11 @@
  */
 
 #include <math.h>
+#include <string.h>
 
+#include "cpu.h"
 #include "encode.h"
+#include "fir_row.h"
 
 /* 1.3 MHz low-pass Gaussian for U/V at PAL 4xfsc [Clarke 3.2.4: >= -3 dB
  * at 1.3 MHz, <= -20 dB at 4.0 MHz]: ld-chroma-encoder's 13 taps
@@ -87,6 +90,10 @@ int comp_encode_init(comp_encode_t *e, int standard, int setup, int precomb)
     e->kv = (int32_t)lrint((1.0 - 0.299) * KR / (112.0 * 256.0) * span * 32768.0);
 
     comp_sc_sin_q15(e->den, e->sin_q15);
+
+    for (int j = 0; j < e->uv_ntaps; j++)
+        e->uv_taps32[j] = e->uv_taps[j];
+    e->fir_row = comp_get_fir_row_q15_fn(comp_cpu_detect());
     return 0;
 }
 
@@ -96,23 +103,25 @@ void comp_encode_line(const comp_encode_t *e, uint16_t *dst,
 {
     const int w = e->width;
     const int ntaps = e->uv_ntaps;
-    int32_t uf[COMP_ACTIVE_WIDTH_PAL];
-    int32_t vf[COMP_ACTIVE_WIDTH_PAL];
+    const int wa = COMP_FIR_ROW_ALIGN(w);
+    int32_t uf[COMP_FIR_ROW_ALIGN(COMP_ACTIVE_WIDTH_PAL)];
+    int32_t vf[COMP_FIR_ROW_ALIGN(COMP_ACTIVE_WIDTH_PAL)];
+    /* staged FIR input: in[i] = src[i - ntaps/2] - 32768 for i-ntaps/2
+     * in [0, w), 0 elsewhere -- centring the row and zeroing the wings
+     * reproduces the C bounds check (blanking carries no chroma). Sized
+     * for the kernel's read span, ALIGN(w) + ntaps - 1. */
+    int32_t us[COMP_FIR_ROW_ALIGN(COMP_ACTIVE_WIDTH_PAL) + COMP_UV_MAXTAPS - 1];
+    int32_t vs[COMP_FIR_ROW_ALIGN(COMP_ACTIVE_WIDTH_PAL) + COMP_UV_MAXTAPS - 1];
+    const int lo = ntaps / 2;
 
-    /* low-pass U/V, zero-padded at the active edges (blanking carries no
-     * chroma, so this matches filtering the full stored line) */
-    for (int x = 0; x < w; x++) {
-        int32_t au = 0, av = 0;
-        for (int j = 0; j < ntaps; j++) {
-            const int k = x + j - ntaps / 2;
-            if (k >= 0 && k < w) {
-                au += e->uv_taps[j] * (srcu[k] - 32768);
-                av += e->uv_taps[j] * (srcv[k] - 32768);
-            }
-        }
-        uf[x] = (au + 16384) >> 15;
-        vf[x] = (av + 16384) >> 15;
+    memset(us, 0, sizeof(int32_t) * (wa + ntaps - 1));
+    memset(vs, 0, sizeof(int32_t) * (wa + ntaps - 1));
+    for (int k = 0; k < w; k++) {
+        us[k + lo] = srcu[k] - 32768;
+        vs[k + lo] = srcv[k] - 32768;
     }
+    e->fir_row(uf, us, e->uv_taps32, ntaps, w);
+    e->fir_row(vf, vs, e->uv_taps32, ntaps, w);
 
     /* at 4xfsc the carrier advances exactly 90 degrees per sample, so a
      * line needs only its start-phase sine and cosine, cycled through a

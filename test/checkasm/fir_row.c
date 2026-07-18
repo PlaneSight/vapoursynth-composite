@@ -19,7 +19,9 @@ static CHECKASM_ALIGN(int32_t out_a[COMP_FIR_ROW_ALIGN(MAXW)]);
 /* the production widths plus ragged and tiny ones */
 static const int widths[] = { 1, 7, 8, 16, 100, 501, 754, 758, 928 };
 #define NWIDTHS (int)(sizeof(widths) / sizeof(widths[0]))
-static const int tapss[] = { COMP_NARROW_TAPS, 17, COMP_EQ_TAPS };
+/* 9 is the NTSC encoder's U/V low-pass; 13 the PAL encoder's and the
+ * decoder's narrow chroma LP; 31 the eq boost; 17 a ragged middle */
+static const int tapss[] = { 9, COMP_NARROW_TAPS, 17, COMP_EQ_TAPS };
 #define NTAPS (int)(sizeof(tapss) / sizeof(tapss[0]))
 
 /* magnitudes within the kernel contract |acc| < 2^45: up to 31 taps of
