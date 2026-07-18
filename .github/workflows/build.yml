@@ -1,0 +1,237 @@
+name: Build
+
+on: [push, pull_request, workflow_dispatch]
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+
+    steps:
+    - uses: actions/checkout@v6
+
+    - name: Install dependencies
+      run: |
+        sudo apt-get update
+        sudo apt-get install -y nasm meson ninja-build libfftw3-dev
+        pip install vapoursynth numpy
+
+    - name: Build and run checkasm
+      run: |
+        meson setup build -Davisynth=true
+        ninja -C build
+        meson test -C build -v
+
+    - name: Run filter tests
+      run: python3 test/test_composite.py build/composite.so
+
+    - name: Check for AVX-512 leaking into non-avx512 code
+      run: |
+        set -eux
+        # x86inc emits some mnemonics as EVEX when that is the only encoding
+        # for the given operands (vpbroadcastd from a GPR, say, which has no
+        # VEX form), so writing one under INIT_YMM/INIT_XMM silently produces
+        # an AVX-512 instruction: fine on AVX-512 hardware, an illegal
+        # instruction everywhere else. In 64-bit code a leading 0x62 byte is
+        # always the EVEX prefix; flag any such instruction whose enclosing
+        # function name does not end in avx512.
+        # The scanner is written to a runner-local temp file (not committed)
+        # so its stdin stays free for the objdump pipe.
+        cat > "$RUNNER_TEMP/evex_scan.py" <<'PY'
+        import re, sys
+        def is_avx512(name):
+            # objdump prints local labels as "parent.locallabel"; the ISA tier
+            # suffix is on the parent symbol, before the first '.'. A bare
+            # "..@NNNN.label" x86inc macro-local has no parent part at all --
+            # keep the previous global label's name in that case.
+            base = name.split(".", 1)[0]
+            return base.rsplit("_", 1)[-1] in ("avx512", "avx512icl")
+        label = re.compile(r"^[0-9a-f]+ <([^>]+)>:")
+        insn  = re.compile(r"\s+([0-9a-f]+):\s+((?:[0-9a-f]{2} )+)\s*(\S.*)?$")
+        cur, scanned, leaks = "?", 0, []
+        for line in sys.stdin:
+            m = label.match(line)
+            if m:
+                name = m.group(1)
+                if name.split(".", 1)[0]:
+                    cur = name
+                scanned += 1
+                continue
+            m = insn.match(line)
+            # A wrapped continuation line (a long instruction's trailing bytes
+            # on their own line) has no decoded mnemonic; its first byte being
+            # 0x62 does not mean an instruction starts there.
+            if m and m.group(3) and m.group(2).split()[0] == "62" and not is_avx512(cur):
+                leaks.append((m.group(1), cur, m.group(3).strip()))
+        if not scanned:
+            sys.exit("error: no function labels in disassembly (stripped?)")
+        if leaks:
+            print("error: %d AVX-512 (EVEX) instruction(s) in non-avx512 "
+                  "function(s):" % len(leaks), file=sys.stderr)
+            seen = set()
+            for va, fn, text in leaks:
+                if fn not in seen:
+                    seen.add(fn)
+                    print("  0x%s  %s  |  %s" % (va, fn, text), file=sys.stderr)
+            sys.exit(1)
+        print("no EVEX leak (%d functions scanned)" % scanned)
+        PY
+        objdump -d build/composite.so | python3 "$RUNNER_TEMP/evex_scan.py"
+
+  build-non-windows-wheel:
+    strategy:
+      matrix:
+        include:
+        - arch: linux_x86_64
+          runs-on: ubuntu-latest
+        - arch: linux_aarch64
+          runs-on: ubuntu-24.04-arm
+        - arch: macosx_x86_64
+          runs-on: macos-26-intel
+        - arch: macosx_arm64
+          runs-on: macos-26
+      fail-fast: false
+
+    runs-on: ${{ matrix.runs-on }}
+
+    steps:
+    - uses: actions/checkout@v6
+
+    - uses: pypa/cibuildwheel@v3.4.0
+      env:
+        CIBW_BUILD: cp314-*
+        CIBW_BUILD_FRONTEND: uv
+        CIBW_BEFORE_ALL_LINUX: >-
+          (yum install -y nasm fftw-devel || dnf install -y nasm fftw-devel ||
+           apk add --no-cache nasm fftw-dev || true)
+        CIBW_BEFORE_ALL_MACOS: brew untap aws/tap || true; brew install nasm fftw
+      with:
+        output-dir: dist
+        extras: uv
+
+    - name: Fix tag
+      run: |
+        pipx run wheel tags --remove --python-tag py3 --abi-tag none dist/*.whl
+
+    - uses: actions/upload-artifact@v7
+      with:
+        name: composite-${{ matrix.arch }}
+        path: dist
+
+  build-windows:
+    runs-on: windows-latest
+
+    defaults:
+      run:
+        shell: msys2 {0}
+
+    steps:
+    - uses: actions/checkout@v6
+
+    - uses: msys2/setup-msys2@v2
+      with:
+        msystem: UCRT64
+        update: true
+        install: >-
+          mingw-w64-ucrt-x86_64-git
+          mingw-w64-ucrt-x86_64-nasm
+          mingw-w64-ucrt-x86_64-ninja
+          mingw-w64-ucrt-x86_64-fftw
+          mingw-w64-ucrt-x86_64-python-wheel
+          mingw-w64-ucrt-x86_64-toolchain
+          mingw-w64-ucrt-x86_64-uv
+
+    # The AviSynth C API is __declspec(dllimport) on Windows, so the module
+    # needs an import library to link. MSYS2 has no AviSynth package, so
+    # synthesize one: every AVSC_API entry point in the vendored header
+    # becomes a .def export, which dlltool turns into a library. Deriving
+    # the list from the header keeps it from going stale.
+    #
+    # It must be a DELAY-import library (-y). A normal one puts AviSynth.dll
+    # in the PE import table, which the Windows loader binds eagerly, so the
+    # module would fail to load for VapourSynth users who have no AviSynth
+    # installed. Delay-loading binds on the first avs_* call instead — which
+    # only ever happens when AviSynth itself is the host.
+    - name: Generate the AviSynth delay-import library
+      run: |
+        mkdir -p avisynth-implib
+        { echo "LIBRARY AviSynth.dll"; echo "EXPORTS";
+          grep -oE 'AVSC_API\([^,]+, *([a-z_0-9]+)\)' third_party/avisynth/avisynth_c.h |
+            sed -E 's/.*, *([a-z_0-9]+)\)/    \1/' | sort -u
+        } > avisynth-implib/avisynth.def
+        dlltool -d avisynth-implib/avisynth.def -y avisynth-implib/libavisynth_delay.a
+        wc -l < avisynth-implib/avisynth.def
+
+    # The import library is named by full path rather than -L/-l, because
+    # -static makes the linker reject one found that way, and it goes
+    # through LDFLAGS (which meson folds into c_link_args at configure)
+    # because a -Csetup-args value containing spaces is not reliably
+    # re-split into separate meson arguments. cygpath converts it: ld.exe
+    # is a native Windows binary and cannot read an MSYS path.
+    - name: Build the wheel
+      run: |
+        implib=$(cygpath -m "$(pwd)/avisynth-implib/libavisynth_delay.a")
+        LDFLAGS="-static $implib -ldelayimp" uv build
+
+    - name: Fix tag and strip dll
+      run: |
+        cd dist
+        wheel tags --remove --python-tag py3 --abi-tag none *.whl
+        wheel unpack --dest unpacked *.whl
+        rm *.whl
+        strip $(find . -name '*.dll')
+        wheel pack unpacked/*
+
+    # AviSynth users get the very same binary the wheel ships -- one
+    # module serves both hosts -- just lifted out as a drop-in file,
+    # since AviSynth has no package manager.
+    - name: Extract the standalone plugin DLL
+      run: |
+        mkdir -p dist-dll
+        cp "$(find dist/unpacked -name 'composite*.dll' | head -1)" dist-dll/composite.dll
+        ls -la dist-dll/
+
+    # AviSynth.dll must not appear as a load-time import, or the module
+    # fails to load for VapourSynth users without AviSynth installed.
+    - name: Check that AviSynth.dll is not a load-time dependency
+      run: |
+        objdump -p dist-dll/composite.dll |
+          sed -n '/The Import Tables/,/^There is/p' > imports.txt
+        cat imports.txt
+        if grep -qi 'AviSynth.dll' imports.txt; then
+          echo "ERROR: AviSynth.dll is a load-time import; delay-loading is broken"
+          exit 1
+        fi
+
+    - uses: actions/upload-artifact@v7
+      with:
+        name: composite-avisynth-win64
+        path: dist-dll/composite.dll
+
+    - uses: actions/upload-artifact@v7
+      with:
+        name: composite-sdist
+        path: dist/*.tar.gz
+
+    - uses: actions/upload-artifact@v7
+      with:
+        name: composite-win_amd64
+        path: dist/*.whl
+
+  publish:
+    permissions:
+      id-token: write
+    needs: [test, build-non-windows-wheel, build-windows]
+    if: ${{ startsWith(github.ref, 'refs/tags/') }}
+    runs-on: ubuntu-latest
+
+    steps:
+    # Wheels and the sdist only: twine check globs the whole directory and
+    # errors on anything that is not a distribution, so the standalone
+    # AviSynth DLL artifact must not land here.
+    - uses: actions/download-artifact@v8
+      with:
+        path: dist
+        pattern: composite-!(avisynth-*)
+        merge-multiple: true
+
+    - uses: pypa/gh-action-pypi-publish@release/v1

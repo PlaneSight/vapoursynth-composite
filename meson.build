@@ -20,7 +20,11 @@ incdir = include_directories(
 )
 
 m_dep = cc.find_library('m', required: false)
-fftw3f_dep = dependency('fftw3f')
+# Static on macOS: a bundled libfftw3f.dylib carries Homebrew's own
+# minimum-OS version, which is newer than the wheel's target, and the
+# wheel repair step refuses to package it. Linking it in sidesteps both
+# the version floor and the bundling.
+fftw3f_dep = dependency('fftw3f', static: host_machine.system() == 'darwin')
 threads_dep = dependency('threads')
 core_deps = [m_dep, fftw3f_dep, threads_dep]
 
@@ -30,11 +34,16 @@ core_sources = files('src/subcarrier.c', 'src/encode.c', 'src/transform2d.c',
 
 if host_machine.cpu_family() == 'x86_64'
     add_languages('nasm', native: false)
-    add_project_arguments(
+    nasm_args = [
         '-DARCH_X86_64=1', '-DPIC', '-Dprivate_prefix=comp',
         '-I' + meson.current_source_dir() / 'x86/',
-        language: 'nasm',
-    )
+    ]
+    # Mach-O decorates C symbols with a leading underscore, which x86inc
+    # applies only when PREFIX is defined
+    if host_machine.system() == 'darwin'
+        nasm_args += '-DPREFIX'
+    endif
+    add_project_arguments(nasm_args, language: 'nasm')
     core_sources += files('x86/cpu.asm', 'x86/pal_demod.asm', 'x86/fir_row.asm',
                           'x86/split3d.asm', 'x86/lut_gain.asm',
                           'x86/t3d_filter.asm', 'x86/comb2d.asm',

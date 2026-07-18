@@ -1,0 +1,35 @@
+[build-system]
+requires = ["meson-python", "VapourSynth>=66"]
+build-backend = "mesonpy"
+
+[project]
+name = "vapoursynth-composite"
+description = "PAL/NTSC composite video encoder/decoder for VapourSynth and AviSynth+, for removing cross-luma and cross-color artifacts"
+readme = "README.md"
+requires-python = ">=3.12"
+license = "GPL-3.0-or-later"
+license-files = ["COPYING"]
+keywords = ["vapoursynth", "avisynth", "pal", "ntsc", "composite", "cross-color", "restoration"]
+classifiers = [
+  "Development Status :: 4 - Beta",
+  "Environment :: Plugins",
+  "Natural Language :: English",
+  "Operating System :: MacOS",
+  "Operating System :: Microsoft :: Windows",
+  "Operating System :: POSIX",
+  "Operating System :: Unix",
+  "Programming Language :: C",
+  "Programming Language :: Assembly",
+  "Topic :: Multimedia :: Video",
+]
+dependencies = ["VapourSynth>=66"]
+dynamic = ["version"]
+
+[project.urls]
+Repository = "https://github.com/ifb/vapoursynth-composite"
+
+[tool.meson-python.args]
+setup = ["-Dcheckasm=disabled", "-Davisynth=true"]
+
+[tool.meson-python.wheel]
+exclude = ["*.dll.a"]
