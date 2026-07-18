@@ -99,6 +99,14 @@ cglobal pal_demod_row, 6, 14, 16, u, v, m, n, stride, cf, \
     mov          strided, 0xAAAA  ; k2 selects the odd dword lanes
     kmovw        k2, strided
     kxnorw       k1, k1, k1
+    ; vswitch is a uniform +/-1; k3 = all-ones when it is -1, so a
+    ; merge-masked 0 - v negates exactly those lanes (there is no EVEX
+    ; psignd, and this beats pmulld: 1 uop vs 2 on Intel, 1 on Zen)
+    xor          strided, strided
+    cmp          dword r9m, 0
+    setl         strideb
+    neg          strided
+    kmovw        k3, strided
 %endif
     xor          xq, xq
 .loop:
@@ -158,11 +166,12 @@ cglobal pal_demod_row, 6, 14, 16, u, v, m, n, stride, cf, \
 
     ; v = vswitch * (-(qv0*bp - pv0*bq + 8192) >> 14)
     ROTATE       m10, m7, m8, m6, m9, psubq
-    SPLATD       m11, dword r9m   ; vswitch
 %if mmsize == 64
-    pmulld       m10, m11         ; no EVEX psignd; vswitch is +/-1
+    vpxord       m11, m11, m11
+    vpsubd       m10{k3}, m11, m10   ; conditional negate by vswitch (k3)
     vmovdqu32    [vq + xq*4]{k1}, m10
 %else
+    SPLATD       m11, dword r9m   ; vswitch
     psignd       m10, m11
     movu         [vq + xq*4], m10
 %endif
