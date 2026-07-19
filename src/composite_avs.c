@@ -522,8 +522,9 @@ static AVS_Value AVSC_CC comp_avs_dec_create(AVS_ScriptEnvironment *env,
         return avs_new_value_error("Decode: standard must be pal or ntsc");
 
     const int width = comp_avs_opt_int(args, 2, 720);
-    if (width < 16 || width > 8192)
-        return avs_new_value_error("Decode: width must be between 16 and 8192");
+    if (width != 0 && (width < 16 || width > 8192))
+        return avs_new_value_error("Decode: width must be 0 (raw raster) "
+                                   "or between 16 and 8192");
 
     const int threshold_unset = !avs_defined(avs_array_elt(args, 3));
     const double threshold = comp_avs_opt_float(args, 3, 0.4);
@@ -705,10 +706,16 @@ static AVS_Value AVSC_CC comp_avs_dec_create(AVS_ScriptEnvironment *env,
     fi->free_filter = comp_avs_dec_free;
     fi->user_data = f;
 
-    /* resample back to the caller's BT.601 raster */
     AVS_Value dec_v;
     avs_set_to_clip(&dec_v, dec_clip);
     avs_release_clip(dec_clip);
+
+    /* width=0: raw 4xfsc raster (YUV or YUVA), no resample; the decode
+     * clip already carries the props natively */
+    if (width == 0)
+        return dec_v;
+
+    /* resample back to the caller's BT.601 raster */
     AVS_Value resampled = comp_avs_resample_back(env, dec_v, "Decode", standard,
                                                  width, in_h, want_mask);
     if (avs_is_error(resampled)) {
@@ -860,8 +867,9 @@ static AVS_Value AVSC_CC comp_avs_res_create(AVS_ScriptEnvironment *env,
     avs_release_clip(src_clip);
 
     const int width = comp_avs_opt_int(args, 2, src_width);
-    if (width < 16 || width > 8192)
-        return avs_new_value_error("Restore: width must be between 16 and 8192");
+    if (width != 0 && (width < 16 || width > 8192))
+        return avs_new_value_error("Restore: width must be 0 (raw raster) "
+                                   "or between 16 and 8192");
 
     const int threshold_unset = !avs_defined(avs_array_elt(args, 3));
     const double threshold = comp_avs_opt_float(args, 3, 0.4);
@@ -1053,6 +1061,12 @@ static AVS_Value AVSC_CC comp_avs_res_create(AVS_ScriptEnvironment *env,
     AVS_Value dec_v;
     avs_set_to_clip(&dec_v, dec_clip);
     avs_release_clip(dec_clip);
+
+    /* width=0: raw 4xfsc raster, no resample and no edge splice (at raster
+     * width nothing falls outside). The decode clip carries the props
+     * natively; return it directly. */
+    if (width == 0)
+        return dec_v;
 
     /* stage 4: back to the caller's raster, then splice the un-modeled
      * outer columns through from the source. */

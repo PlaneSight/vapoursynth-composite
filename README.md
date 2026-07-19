@@ -255,7 +255,17 @@ exactly `758×480`, `758×486` (NTSC) or `928×576` (PAL).
 Parameters (all optional, all also available on `Restore`):
 
 - `standard` — `"pal"` or `"ntsc"`. Required to match the encode.
-- `width` — output width, default `720`.
+- `width` — output width, default `720`. Decoding happens internally on
+  the 4×fsc raster and the result is resampled to `width` with a subpixel
+  crop that lands the samples on the BT.601 grid (the exact inverse of
+  `Encode`'s mapping), so a round trip is geometry-preserving. Set
+  `width=0` to skip that final horizontal resample entirely and get the
+  raw decode raster — **NTSC 758**, **PAL 928** wide (the SMPTE 244M /
+  EBU 4fsc sampling), at the input height. The picture (and the `mask`
+  output, which stays crisp) then come straight off the decode grid with
+  no resize; these are non-square-pixel frames you resample yourself.
+  Note that setting `width` to the raster value (e.g. `758`) is *not* the
+  same — that still resamples; only `width=0` bypasses it.
 - `dimensions` — `3` (default) spatio-temporal separation using
   neighboring frames; `2` fast 2D (spatial / line comb); `1` a crude
   notch reference (worst case).
@@ -311,7 +321,44 @@ Overlay(dec, alt, mask=mask)
 ```
 
 The mask is resampled to the output `width` with bilinear (a clean soft
-edge, unlike the picture's sharper filter).
+edge, unlike the picture's sharper filter). For a crisp, un-resampled
+mask, use `width=0` (see `width` above) — the mask then comes straight
+off the decode raster as a hard 0/max mask.
+
+## Working at the 4fsc raster (`width=0`)
+
+`width=0` gives you the raw 4×fsc raster with no horizontal resample, so
+you can run your own processing at that sampling and convert to BT.601
+later without a double resize. When you *do* want BT.601 (720-wide,
+square-ish pixels), reproduce exactly what the plugin does internally:
+replicate-pad the edges, then a subpixel-crop Spline36. This is
+byte-identical to `Decode(width=720)`:
+
+```python
+def to_bt601(raw, standard, width=720):
+    # rho = 4fsc/13.5 MHz sample-rate ratio; active0 = active-window start
+    # on the 4fsc raster; anchor601 = BT.601 first active luma sample
+    if standard == "pal":
+        rho, active0, anchor601 = 540000 / 709379, 182.0, 132.0
+    else:
+        rho, active0, anchor601 = 33 / 35, 130 + 57 / 90, 122.0
+    pad = 24
+    # edge-replicate `pad` columns each side (NOT black — a black step
+    # would make Spline36 ring inward along the frame border)
+    left  = raw.std.Crop(right=raw.width - 1).resize.Point(width=pad)
+    right = raw.std.Crop(left=raw.width - 1).resize.Point(width=pad)
+    padded = core.std.StackHorizontal([left, raw, right])
+    src_left = pad + anchor601 / rho - (active0 - 0.5) - 0.5 * (720 / width) / rho
+    return padded.resize.Spline36(width=width, height=raw.height,
+                                  src_left=src_left, src_width=720 / rho)
+```
+
+Edges are filled by replication here; the plugin's own `Restore` instead
+passes the few outermost columns through from the source (they sample
+beyond the raster and were never reconstructed). Reproduce that only if
+you specifically want byte-identical-to-`Restore` borders and still hold
+the original source clip — for most processing, the replicated edge is
+fine (and more consistent).
 
 ## Frame properties
 

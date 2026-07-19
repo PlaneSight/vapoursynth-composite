@@ -429,8 +429,11 @@ static void VS_CC comp_decode_create(const VSMap *in, VSMap *out, void *user_dat
     int width = vsapi->mapGetIntSaturated(in, "width", 0, &err);
     if (err)
         width = 720;
-    if (width < 16 || width > 8192)
-        RETERROR("width must be between 16 and 8192");
+    /* width=0 requests the raw 4xfsc decode raster (SMPTE 244M / EBU 4fsc)
+     * with no horizontal resample: the picture and mask come straight off
+     * the decode grid, crisp, for callers who resize themselves. */
+    if (width != 0 && (width < 16 || width > 8192))
+        RETERROR("width must be 0 (raw raster) or between 16 and 8192");
 
     double threshold = vsapi->mapGetFloat(in, "threshold", 0, &err);
     const int threshold_unset = err;
@@ -635,6 +638,15 @@ static void VS_CC comp_decode_create(const VSMap *in, VSMap *out, void *user_dat
         }
     }
 
+    /* width=0: raw 4xfsc raster, no horizontal resample. The decode node
+     * is already the raster picture; return it (and the raw mask) as-is. */
+    if (width == 0) {
+        vsapi->mapConsumeNode(out, "clip", dec_node, maReplace);
+        if (mask_node)
+            vsapi->mapConsumeNode(out, "clip", mask_node, maAppend);
+        return;
+    }
+
     /* resample back to the BT.601 raster: the exact inverse of Encode's
      * mapping. The 601 window is wider in time than the active raster,
      * so the outermost samples come from replicated edge padding. */
@@ -700,8 +712,11 @@ static void VS_CC comp_restore_create(const VSMap *in, VSMap *out, void *user_da
     int width = vsapi->mapGetIntSaturated(in, "width", 0, &err);
     if (err)
         width = src_width;
-    if (width < 16 || width > 8192)
-        RETERROR("width must be between 16 and 8192");
+    /* width=0 requests the raw 4xfsc decode raster (SMPTE 244M / EBU 4fsc)
+     * with no horizontal resample: the picture and mask come straight off
+     * the decode grid, crisp, for callers who resize themselves. */
+    if (width != 0 && (width < 16 || width > 8192))
+        RETERROR("width must be 0 (raw raster) or between 16 and 8192");
 
     double threshold = vsapi->mapGetFloat(in, "threshold", 0, &err);
     const int threshold_unset = err;
@@ -956,6 +971,16 @@ static void VS_CC comp_restore_create(const VSMap *in, VSMap *out, void *user_da
             vsapi->mapSetError(out, "Restore: mask extraction failed");
             return;
         }
+    }
+
+    /* width=0: raw 4xfsc raster, no resample and no edge splice (at raster
+     * width nothing falls outside, so there are no un-modeled columns). The
+     * scalar difficulty props ride natively on the decode frame. */
+    if (width == 0) {
+        vsapi->mapConsumeNode(out, "clip", dec_node, maReplace);
+        if (mask_node)
+            vsapi->mapConsumeNode(out, "clip", mask_node, maAppend);
+        return;
     }
 
     /* the decode node carries the separation-confidence props; the edge

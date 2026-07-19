@@ -544,4 +544,54 @@ for bad, needle in ((dict(standard='pal'), 'hybrid'),
     else:
         assert False, f'expected mask error: {needle}'
 
+# ---- width=0: raw 4xfsc raster, no horizontal resample
+# geometry is the raster width at the input height (both NTSC heights, PAL)
+n480 = core.composite.Decode(enc9, standard='ntsc', width=0)
+assert (n480.width, n480.height) == (758, 480)
+enc486 = core.composite.Encode(
+    core.std.BlankClip(format=vs.YUV444P16, width=720, height=486, length=1,
+                       color=[32128, 40960, 28672]), standard='ntsc')
+n486 = core.composite.Decode(enc486, standard='ntsc', width=0)
+assert (n486.width, n486.height) == (758, 486)
+p576 = core.composite.Restore(flat([30000, 40960, 28672]), standard='pal', width=0)
+assert (p576.width, p576.height) == (928, 576)
+# a bare no-mask raw clip, and default width still resamples to 720
+assert isinstance(n480, vs.VideoNode)
+assert core.composite.Decode(enc9, standard='ntsc').width == 720
+# a small width is still rejected (only 0 is the special value)
+try:
+    core.composite.Decode(enc9, standard='ntsc', width=5)
+except vs.Error as e:
+    assert 'width must be' in str(e)
+else:
+    assert False, 'width=5 accepted'
+
+# the raw mask is crisp: exactly {0, 65535}, no bilinear intermediates
+rawmask = core.composite.Restore(bff9, standard='ntsc', width=0, mask='motion')[1]
+assert rawmask.format.id == vs.GRAY16 and (rawmask.width, rawmask.height) == (758, 480)
+mvals = set(rawmask.get_frame(4)[0][100, x] for x in range(0, 758, 8))
+assert mvals <= {0, 65535}, ('raw mask not binary', mvals)
+
+# the documented BT.601 recipe reproduces Decode(width=720) byte-for-byte
+def to_bt601(raw, standard, width=720):
+    if standard == 'pal':
+        rho, active0, anchor601 = 540000 / 709379, 182.0, 132.0
+    else:
+        rho, active0, anchor601 = 33 / 35, 130 + 57 / 90, 122.0
+    pad = 24
+    left = raw.std.Crop(right=raw.width - 1).resize.Point(width=pad)
+    right = raw.std.Crop(left=raw.width - 1).resize.Point(width=pad)
+    padded = core.std.StackHorizontal([left, raw, right])
+    src_left = pad + anchor601 / rho - (active0 - 0.5) - 0.5 * (720 / width) / rho
+    return padded.resize.Spline36(width=width, height=raw.height,
+                                  src_left=src_left, src_width=720 / rho)
+
+for enc, std, h in ((enc9, 'ntsc', 480), (core.composite.Encode(
+        flat([30000, 40960, 28672]), standard='pal'), 'pal', 576)):
+    ref = core.composite.Decode(enc, standard=std, width=720).get_frame(0)
+    rec = to_bt601(core.composite.Decode(enc, standard=std, width=0), std).get_frame(0)
+    for pl in range(3):
+        a, b = ref[pl], rec[pl]
+        assert bytes(a) == bytes(b), (std, 'recipe != Decode(720)', pl)
+
 print('test_composite: all tests passed')
