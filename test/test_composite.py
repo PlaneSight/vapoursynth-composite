@@ -508,4 +508,40 @@ assert all(k in pprops for k in CONF)
 r0 = core.composite.Restore(bff9, standard='ntsc', refine=0).get_frame(4).props
 assert 'CompositeRefineResidual' not in r0 and 'CompositeRefineCorrection' not in r0
 
+# ---- mask="motion": second output clip, return-type contract, polarity
+# no mask -> a bare clip (the vnode[] registration must collapse a single
+# append; a 1-element list would break every existing script)
+assert isinstance(core.composite.Restore(bff9, standard='ntsc'), vs.VideoNode)
+assert isinstance(core.composite.Decode(enc9, standard='ntsc'), vs.VideoNode)
+
+# mask -> [picture, mask]
+for out in (core.composite.Restore(bff9, standard='ntsc', mask='motion'),
+            core.composite.Decode(enc9, standard='ntsc', mask='motion')):
+    assert isinstance(out, list) and len(out) == 2, out
+    pic, mask = out
+    assert pic.format.id == vs.YUV444P16
+    assert mask.format.id == vs.GRAY16
+    assert (mask.width, mask.height) == (pic.width, pic.height)
+    # the attached mask frame must not leak onto the picture output
+    assert 'CompositeMotionMask' not in pic.get_frame(4).props
+    # mask is a probability of 16-bit range; still content -> low (this
+    # flat clip is fully static, so the router sends it all to the comb)
+    mrow = mask.get_frame(4)[0]
+    assert set(mrow[100, x] for x in range(64, 656, 16)) <= {0}, 'static -> still (0)'
+
+# mask errors off the hybrid path
+for bad, needle in ((dict(standard='pal'), 'hybrid'),
+                    (dict(standard='ntsc', transform=1), 'hybrid'),
+                    (dict(standard='ntsc', dimensions=2), 'hybrid'),
+                    (dict(standard='ntsc', mask='rainbow'), 'mask must be')):
+    src = flat([30000, 40960, 28672]) if bad.get('standard') == 'pal' else bff9
+    kw = {k: v for k, v in bad.items()}
+    kw.setdefault('mask', 'motion')
+    try:
+        core.composite.Restore(src, **kw)
+    except vs.Error as e:
+        assert needle in str(e), (needle, str(e))
+    else:
+        assert False, f'expected mask error: {needle}'
+
 print('test_composite: all tests passed')

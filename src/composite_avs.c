@@ -43,6 +43,7 @@ struct comp_avs_dec_t {
     int standard;
     int height;      /* raster height of the composite input */
     int in_frames;   /* source clip length, for edge clamping */
+    int want_mask;   /* emit the motion mask as the YUVA alpha plane */
     AVS_Clip *anchor; /* Restore: the raster picture for refine, else NULL */
 };
 
@@ -140,6 +141,20 @@ static AVS_VideoFrame *AVSC_CC comp_avs_dec_get_frame(AVS_FilterInfo *fi, int n)
      * window. */
     AVS_VideoFrame *anchor = f->anchor ? avs_get_frame(f->anchor, n) : NULL;
 
+    /* mask="motion": dst is YUVA (see the create function); the motion
+     * mask goes into the alpha plane at the raster. Pre-zero so blanking/
+     * edge rows read still (0). The create function resamples it out. */
+    uint16_t *maskp = NULL;
+    ptrdiff_t mask_stride = 0;
+    if (f->want_mask) {
+        maskp = (uint16_t *)avs_get_write_ptr_p(dst, AVS_PLANAR_A);
+        mask_stride = avs_get_pitch_p(dst, AVS_PLANAR_A) / 2;
+        const int aw = avs_get_row_size_p(dst, AVS_PLANAR_A) / 2;
+        const int ah = avs_get_height_p(dst, AVS_PLANAR_A);
+        for (int r = 0; r < ah; r++)
+            memset(maskp + r * mask_stride, 0, sizeof(uint16_t) * aw);
+    }
+
     comp_decode_metrics_t mt = COMP_METRICS_INIT;
     comp_decode_frame(&f->dec, n, f->in_frames, f->height,
                       comp_avs_row_offset(f->standard, f->height, env, src),
@@ -152,7 +167,7 @@ static AVS_VideoFrame *AVSC_CC comp_avs_dec_get_frame(AVS_FilterInfo *fi, int n)
                       avs_get_pitch_p(dst, AVS_PLANAR_U) / 2,
                       (uint16_t *)avs_get_write_ptr_p(dst, AVS_PLANAR_V),
                       avs_get_pitch_p(dst, AVS_PLANAR_V) / 2,
-                      &mt);
+                      &mt, maskp, mask_stride);
 
     /* each difficulty prop exists only where its path is active. The
      * resample and the Restore edge-splice drop these downstream; the
@@ -203,10 +218,11 @@ static void AVSC_CC comp_avs_dec_free(AVS_FilterInfo *fi)
  * the Restore edge-splice needs for the source). `clip` is a non-owning
  * element copy; avs_invoke does not consume it. Returns an error
  * AVS_Value if avsresize is not installed. */
-static AVS_Value comp_avs_zresize(AVS_ScriptEnvironment *env, AVS_Value clip,
-                                  const char *who, int width, int height,
-                                  const char *pixel_type,
-                                  double src_left, double src_width)
+static AVS_Value comp_avs_zresize_f(AVS_ScriptEnvironment *env, AVS_Value clip,
+                                    const char *who, int width, int height,
+                                    const char *pixel_type,
+                                    double src_left, double src_width,
+                                    const char *resample_filter)
 {
     if (!avs_function_exists(env, "z_ConvertFormat")) {
         /* the host does not copy the string, so hand it a saved one:
@@ -218,21 +234,33 @@ static AVS_Value comp_avs_zresize(AVS_ScriptEnvironment *env, AVS_Value clip,
     }
 
     const int crop = src_left == src_left && src_width == src_width; /* !NaN */
-    AVS_Value args[6];
-    const char *names[6];
+    AVS_Value args[7];
+    const char *names[7];
     int n = 4;
     args[0] = clip;                              names[0] = NULL;
     args[1] = avs_new_value_int(width);          names[1] = "width";
     args[2] = avs_new_value_int(height);         names[2] = "height";
     args[3] = avs_new_value_string(pixel_type);  names[3] = "pixel_type";
     if (crop) {
-        args[4] = avs_new_value_float((float)src_left);  names[4] = "src_left";
-        args[5] = avs_new_value_float((float)src_width); names[5] = "src_width";
-        n = 6;
+        args[n] = avs_new_value_float((float)src_left);  names[n] = "src_left"; n++;
+        args[n] = avs_new_value_float((float)src_width); names[n] = "src_width"; n++;
+    }
+    if (resample_filter) {
+        args[n] = avs_new_value_string(resample_filter); names[n] = "resample_filter"; n++;
     }
 
     AVS_Value argv = avs_new_value_array(args, n);
     return avs_invoke(env, "z_ConvertFormat", argv, (const char **)names);
+}
+
+/* the picture resample: zimg's default kernel (matches the VS Spline36 path) */
+static AVS_Value comp_avs_zresize(AVS_ScriptEnvironment *env, AVS_Value clip,
+                                  const char *who, int width, int height,
+                                  const char *pixel_type,
+                                  double src_left, double src_width)
+{
+    return comp_avs_zresize_f(env, clip, who, width, height, pixel_type,
+                              src_left, src_width, NULL);
 }
 
 /* Forward resample to the 4xfsc active raster and YUV444P16. */
@@ -305,17 +333,53 @@ static AVS_Value comp_avs_pad_h(AVS_ScriptEnvironment *env, AVS_Value clip,
  * comp_decode_resample_params. Does not consume `clip`. */
 static AVS_Value comp_avs_resample_back(AVS_ScriptEnvironment *env, AVS_Value clip,
                                         const char *who, int standard,
-                                        int out_width, int height)
+                                        int out_width, int height, int want_mask)
 {
-    AVS_Value padded = comp_avs_pad_h(env, clip, who);
-    if (avs_is_error(padded))
-        return padded;
-
     double dst_left, dst_width;
     comp_decode_resample_params(standard, out_width, &dst_left, &dst_width);
-    AVS_Value ret = comp_avs_zresize(env, padded, who, out_width, height,
-                                     "YUV444P16", dst_left, dst_width);
-    avs_release_value(padded);
+
+    if (!want_mask) {
+        AVS_Value padded = comp_avs_pad_h(env, clip, who);
+        if (avs_is_error(padded))
+            return padded;
+        AVS_Value ret = comp_avs_zresize(env, padded, who, out_width, height,
+                                         "YUV444P16", dst_left, dst_width);
+        avs_release_value(padded);
+        return ret;
+    }
+
+    /* mask="motion": the input is YUVA (alpha = the raster motion mask).
+     * VS has one resampler per graph and z_ConvertFormat would apply the
+     * picture kernel to alpha (and may not resample it well), so split the
+     * mask off and resample it SEPARATELY with bilinear (clean 0/1 ramp,
+     * no Spline36 ringing) on the SAME crop, then reattach. Both use the
+     * shared pad since the geometry is identical. */
+    AVS_Value pic = comp_avs_invoke_pos(env, "RemoveAlphaPlane", &clip, 1);
+    if (avs_is_error(pic))
+        return pic;
+    AVS_Value mask = comp_avs_invoke_pos(env, "ExtractA", &clip, 1);
+    if (avs_is_error(mask)) { avs_release_value(pic); return mask; }
+
+    AVS_Value pic_pad = comp_avs_pad_h(env, pic, who);
+    avs_release_value(pic);
+    if (avs_is_error(pic_pad)) { avs_release_value(mask); return pic_pad; }
+    AVS_Value pic_rs = comp_avs_zresize(env, pic_pad, who, out_width, height,
+                                        "YUV444P16", dst_left, dst_width);
+    avs_release_value(pic_pad);
+    if (avs_is_error(pic_rs)) { avs_release_value(mask); return pic_rs; }
+
+    AVS_Value mask_pad = comp_avs_pad_h(env, mask, who);
+    avs_release_value(mask);
+    if (avs_is_error(mask_pad)) { avs_release_value(pic_rs); return mask_pad; }
+    AVS_Value mask_rs = comp_avs_zresize_f(env, mask_pad, who, out_width, height,
+                                           "Y16", dst_left, dst_width, "bilinear");
+    avs_release_value(mask_pad);
+    if (avs_is_error(mask_rs)) { avs_release_value(pic_rs); return mask_rs; }
+
+    AVS_Value comb[2] = { pic_rs, mask_rs };
+    AVS_Value ret = comp_avs_invoke_pos(env, "AddAlphaPlane", comb, 2);
+    avs_release_value(pic_rs);
+    avs_release_value(mask_rs);
     return ret;
 }
 
@@ -497,6 +561,18 @@ static AVS_Value AVSC_CC comp_avs_dec_create(AVS_ScriptEnvironment *env,
     if (eq == 2 && !has_transform)
         return avs_new_value_error("Decode: eq=2 needs a transform separation");
 
+    /* mask="motion": emit the motion mask as the alpha plane (index 13) */
+    int want_mask = 0;
+    if (avs_defined(avs_array_elt(args, 13))) {
+        const char *mm = avs_as_string(avs_array_elt(args, 13));
+        if (!mm || strcmp(mm, "motion") != 0)
+            return avs_new_value_error("Decode: mask must be \"motion\"");
+        if (!(standard == COMP_STD_NTSC && dimensions == 3 && transform == 2))
+            return avs_new_value_error("Decode: mask=\"motion\" needs the ntsc "
+                                       "hybrid path (dimensions=3, transform=2)");
+        want_mask = 1;
+    }
+
     const int level_unset = !avs_defined(avs_array_elt(args, 9));
     const int level = comp_avs_opt_int(args, 9, 0);
 
@@ -580,6 +656,7 @@ static AVS_Value AVSC_CC comp_avs_dec_create(AVS_ScriptEnvironment *env,
     f->standard = standard;
     f->height = in_h;
     f->in_frames = in_frames;
+    f->want_mask = want_mask;
     /* free_filter/user_data are not set on the filter yet, so on these
      * error paths releasing dec_clip frees only the empty filter shell;
      * f is freed here by hand */
@@ -620,7 +697,9 @@ static AVS_Value AVSC_CC comp_avs_dec_create(AVS_ScriptEnvironment *env,
         comp_avs_set_builtin_lut(&f->dec, standard, dimensions);
     }
 
-    fi->vi.pixel_type = AVS_CS_YUV444P16;
+    /* YUVA when a mask was requested (alpha carries the raster motion
+     * mask; the resample splits it off, resamples bilinear, reattaches) */
+    fi->vi.pixel_type = want_mask ? AVS_CS_YUVA444P16 : AVS_CS_YUV444P16;
     fi->get_frame = comp_avs_dec_get_frame;
     fi->set_cache_hints = comp_avs_dec_set_cache_hints;
     fi->free_filter = comp_avs_dec_free;
@@ -631,7 +710,7 @@ static AVS_Value AVSC_CC comp_avs_dec_create(AVS_ScriptEnvironment *env,
     avs_set_to_clip(&dec_v, dec_clip);
     avs_release_clip(dec_clip);
     AVS_Value resampled = comp_avs_resample_back(env, dec_v, "Decode", standard,
-                                                 width, in_h);
+                                                 width, in_h, want_mask);
     if (avs_is_error(resampled)) {
         avs_release_value(dec_v);
         return resampled;
@@ -826,6 +905,18 @@ static AVS_Value AVSC_CC comp_avs_res_create(AVS_ScriptEnvironment *env,
     if (eq == 2 && !has_transform)
         return avs_new_value_error("Restore: eq=2 needs a transform separation");
 
+    /* mask="motion": emit the motion mask as the alpha plane (index 15) */
+    int want_mask = 0;
+    if (avs_defined(avs_array_elt(args, 15))) {
+        const char *mm = avs_as_string(avs_array_elt(args, 15));
+        if (!mm || strcmp(mm, "motion") != 0)
+            return avs_new_value_error("Restore: mask must be \"motion\"");
+        if (!(standard == COMP_STD_NTSC && dimensions == 3 && transform == 2))
+            return avs_new_value_error("Restore: mask=\"motion\" needs the ntsc "
+                                       "hybrid path (dimensions=3, transform=2)");
+        want_mask = 1;
+    }
+
     const int level_unset = !avs_defined(avs_array_elt(args, 11));
     const int level = comp_avs_opt_int(args, 11, 0);
 
@@ -931,6 +1022,7 @@ static AVS_Value AVSC_CC comp_avs_res_create(AVS_ScriptEnvironment *env,
     df->standard = standard;
     df->height = in_h;
     df->in_frames = dfi->vi.num_frames;
+    df->want_mask = want_mask;
     df->anchor = anchor; /* takes ownership of the second ref */
     if (comp_decode_init(&df->dec, standard, threshold,
                          comp_avs_num_threads(env), setup, dimensions, eq,
@@ -952,7 +1044,7 @@ static AVS_Value AVSC_CC comp_avs_res_create(AVS_ScriptEnvironment *env,
         snprintf(msg, sizeof(msg), "Restore: %s", terr);
         return avs_new_value_error(avs_save_string(env, msg, -1));
     }
-    dfi->vi.pixel_type = AVS_CS_YUV444P16;
+    dfi->vi.pixel_type = want_mask ? AVS_CS_YUVA444P16 : AVS_CS_YUV444P16;
     dfi->get_frame = comp_avs_dec_get_frame;
     dfi->set_cache_hints = comp_avs_dec_set_cache_hints;
     dfi->free_filter = comp_avs_dec_free;
@@ -965,7 +1057,7 @@ static AVS_Value AVSC_CC comp_avs_res_create(AVS_ScriptEnvironment *env,
     /* stage 4: back to the caller's raster, then splice the un-modeled
      * outer columns through from the source. */
     AVS_Value restored = comp_avs_resample_back(env, dec_v, "Restore", standard,
-                                                width, in_h);
+                                                width, in_h, want_mask);
     if (avs_is_error(restored)) {
         avs_release_value(dec_v);
         return restored;
@@ -985,6 +1077,22 @@ static AVS_Value AVSC_CC comp_avs_res_create(AVS_ScriptEnvironment *env,
             avs_release_value(restored);
             avs_release_value(dec_v);
             return src444;
+        }
+        /* when masking, `restored` is YUVA; give the source edge a matching
+         * alpha so StackHorizontal formats agree. These columns were never
+         * motion-analyzed, so their mask is 0 (still) — opacity=0. */
+        if (want_mask) {
+            AVS_Value a[2] = { src444, avs_new_value_float(0.0f) };
+            const char *an[2] = { NULL, "opacity" };
+            AVS_Value ya = avs_invoke(env, "AddAlphaPlane",
+                                      avs_new_value_array(a, 2), an);
+            avs_release_value(src444);
+            if (avs_is_error(ya)) {
+                avs_release_value(restored);
+                avs_release_value(dec_v);
+                return ya;
+            }
+            src444 = ya;
         }
         spliced = comp_avs_edge_splice(env, restored, src444, width, nl, nr);
         avs_release_value(restored);
@@ -1017,12 +1125,12 @@ AVSC_EXPORT const char *AVSC_CC avisynth_c_plugin_init(AVS_ScriptEnvironment *en
     avs_add_function(env, "composite_Decode",
                      "c[standard]s[width]i[threshold]f[setup]b[dimensions]i"
                      "[eq]i[thresholds]f+[transform]i[level]i[lut]f+"
-                     "[evidence]f[cti]b",
+                     "[evidence]f[cti]b[mask]s",
                      comp_avs_dec_create, NULL);
     avs_add_function(env, "composite_Restore",
                      "c[standard]s[width]i[threshold]f[setup]b[dimensions]i"
                      "[eq]i[refine]i[thresholds]f+[precomb]b[transform]i"
-                     "[level]i[lut]f+[evidence]f[cti]b",
+                     "[level]i[lut]f+[evidence]f[cti]b[mask]s",
                      comp_avs_res_create, NULL);
     return "composite: PAL/NTSC composite video encoder/decoder";
 }

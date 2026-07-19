@@ -1359,7 +1359,8 @@ void comp_decode_frame(comp_decode_t *d, int frame, int nframes,
                        uint16_t *dsty, ptrdiff_t ystride,
                        uint16_t *dstu, ptrdiff_t ustride,
                        uint16_t *dstv, ptrdiff_t vstride,
-                       comp_decode_metrics_t *metrics)
+                       comp_decode_metrics_t *metrics,
+                       uint16_t *out_mask, ptrdiff_t mask_stride)
 {
     comp_decode_scratch_t *s = scratch_acquire(d);
     const int w = d->width;
@@ -1531,18 +1532,26 @@ void comp_decode_frame(comp_decode_t *d, int frame, int nframes,
         metrics->conf_std = sqrt(var);
     }
 
-    /* NTSC hybrid: fraction of samples the motion router sent to the
-     * transform, i.e. judged to be in motion (mask 1 = still -> comb, so
-     * motion is mask 0). s->mask is filled only on the transform=2 path. */
-    if (metrics && d->standard == COMP_STD_NTSC && d->dimensions == 3
+    /* NTSC hybrid: the motion router's per-sample decision (s->mask, 1 =
+     * still -> comb, so motion is mask 0), filled only on transform=2.
+     * Report the motion fraction, and emit the per-sample motion mask
+     * (GRAY16, 65535 = motion) at the raster when a mask output is asked
+     * for — matching CompositeMotionFraction's white=motion polarity. */
+    if ((metrics || out_mask) && d->standard == COMP_STD_NTSC && d->dimensions == 3
         && d->use_transform == 2 && s->mask) {
         uint64_t motion = 0;
         for (int r = 0; r < rows; r++) {
             const uint8_t *mk = s->mask + r * w;
-            for (int x = 0; x < w; x++)
-                motion += mk[x] == 0;
+            uint16_t *om = out_mask ? out_mask + r * mask_stride : NULL;
+            for (int x = 0; x < w; x++) {
+                const int is_motion = mk[x] == 0;
+                motion += is_motion;
+                if (om)
+                    om[x] = is_motion ? 65535 : 0;
+            }
         }
-        metrics->motion_fraction = (double)motion / ((double)rows * w);
+        if (metrics)
+            metrics->motion_fraction = (double)motion / ((double)rows * w);
     }
 
     scratch_release(d, s);

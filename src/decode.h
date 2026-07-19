@@ -247,7 +247,12 @@ int comp_decode_look(const comp_decode_t *d);
  * metrics, when non-NULL, receives the per-frame difficulty proxies;
  * each field is written only when its path is active (see
  * comp_decode_metrics_t), so the caller must init it to
- * COMP_METRICS_INIT and emit a prop only for fields that changed. */
+ * COMP_METRICS_INIT and emit a prop only for fields that changed.
+ * out_mask, when non-NULL, receives the per-sample motion-router mask
+ * (GRAY16: 65535 = motion/transform-routed, 0 = still/comb), one frame at
+ * mask_stride, indexed by the same 0-based active rows as dsty (rows
+ * beyond `rows` are untouched, so the caller pre-zeros the plane). It is
+ * written only on the NTSC hybrid path (dimensions=3, transform=2). */
 void comp_decode_frame(comp_decode_t *d, int frame, int nframes,
                        int rows, int row_off,
                        const comp_frame_view_t *views, const int *view_frames,
@@ -256,6 +261,7 @@ void comp_decode_frame(comp_decode_t *d, int frame, int nframes,
                        uint16_t *dsty, ptrdiff_t ystride,
                        uint16_t *dstu, ptrdiff_t ustride,
                        uint16_t *dstv, ptrdiff_t vstride,
-                       comp_decode_metrics_t *metrics);
+                       comp_decode_metrics_t *metrics,
+                       uint16_t *out_mask, ptrdiff_t mask_stride);
 
 #endif

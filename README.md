@@ -270,11 +270,48 @@ Parameters (all optional, all also available on `Restore`):
 - `cti` — luma-guided chroma transient improvement, default off. For
   graphics-like sources only.
 - `setup` — NTSC 7.5 IRE pedestal; must match the encode.
+- `mask` — set to `"motion"` to also output the motion-router mask (see
+  *Motion mask* below). NTSC hybrid path only.
 
 Advanced separation controls (`threshold`, `thresholds`, `level`, `lut`)
 override the built-in trained tables; see the comments in
 `test/calibrate_thresholds.py`. `level=1` is the robust untrained
 alternative to the trained tables on synthetic extremes.
+
+## Motion mask
+
+On the NTSC hybrid path (the default: `dimensions=3`, `transform=2`) the
+decoder routes each sample to either the comb (still regions) or the
+Transform separator (motion). Passing `mask="motion"` exposes that
+per-pixel decision as a second output clip, so you can postprocess the
+moving regions differently — for example, a stronger chroma cleanup only
+where rainbows can still occur. The mask is white (max) where the sample
+was treated as motion and black where it was still, matching the
+convention of the mvtools/mvutensils motion masks.
+
+`mask="motion"` only works on the NTSC hybrid path (it errors elsewhere,
+since no other path has a motion router).
+
+**VapourSynth** returns a two-element list, `[picture, mask]`:
+
+```python
+pic, mask = core.composite.Restore(clip, standard="ntsc", mask="motion")
+alt = pic.some.AggressiveChromaCleanup()
+out = core.std.MaskedMerge(pic, alt, mask, planes=[1, 2])  # moving areas only
+```
+
+**AviSynth+** returns one `YUVA` clip with the mask as its alpha; pull it
+out with `ExtractA`:
+
+```
+dec  = composite_Restore(clip, standard="ntsc", mask="motion")
+mask = ExtractA(dec)
+alt  = AggressiveChromaCleanup(dec)
+Overlay(dec, alt, mask=mask)
+```
+
+The mask is resampled to the output `width` with bilinear (a clean soft
+edge, unlike the picture's sharper filter).
 
 ## Frame properties
 

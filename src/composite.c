@@ -27,6 +27,8 @@ struct comp_filter_t {
     VSVideoInfo vi;
     int standard;
     int in_frames;
+    int want_mask;       /* attach the motion mask as a frame prop (VS has
+                          * no 4-plane YUVA; PropToClip pulls it out) */
     comp_encode_t enc;
     comp_decode_t *dec;
 };
@@ -119,6 +121,25 @@ static const VSFrame *VS_CC comp_decode_get_frame(int n, int activation_reason, 
     const VSFrame *orig = f->orig_node ? vsapi->getFrameFilter(n, f->orig_node, frame_ctx) : NULL;
     VSFrame *dst = vsapi->newVideoFrame(&f->vi.format, f->vi.width, f->vi.height, src, core);
 
+    /* mask="motion": a standalone GRAY16 raster frame holds the motion
+     * mask, attached to the picture frame under a private property. VS has
+     * no 4-plane YUVA; std.PropToClip pulls it back as a separate clip
+     * downstream, so both outputs share this one decode. */
+    VSFrame *maskf = NULL;
+    uint16_t *maskp = NULL;
+    ptrdiff_t mask_stride = 0;
+    if (f->want_mask) {
+        VSVideoFormat gray;
+        vsapi->queryVideoFormat(&gray, cfGray, stInteger, 16, 0, 0, core);
+        maskf = vsapi->newVideoFrame(&gray, f->vi.width, f->vi.height, NULL, core);
+        maskp = (uint16_t *)vsapi->getWritePtr(maskf, 0);
+        mask_stride = vsapi->getStride(maskf, 0) / 2;
+        /* the decode writes the mask only over the active picture rows on
+         * the hybrid path; pre-zero so blanking/edge rows read still (0) */
+        for (int r = 0; r < f->vi.height; r++)
+            memset(maskp + r * mask_stride, 0, sizeof(uint16_t) * f->vi.width);
+    }
+
     comp_decode_metrics_t m = COMP_METRICS_INIT;
     comp_decode_frame(f->dec, n, f->in_frames, f->vi.height, comp_row_offset(f, src, vsapi),
                       views, view_frames, look,
@@ -127,7 +148,7 @@ static const VSFrame *VS_CC comp_decode_get_frame(int n, int activation_reason, 
                       (uint16_t *)vsapi->getWritePtr(dst, 0), vsapi->getStride(dst, 0) / 2,
                       (uint16_t *)vsapi->getWritePtr(dst, 1), vsapi->getStride(dst, 1) / 2,
                       (uint16_t *)vsapi->getWritePtr(dst, 2), vsapi->getStride(dst, 2) / 2,
-                      &m);
+                      &m, maskp, mask_stride);
 
     /* each difficulty prop exists only where its path is active (the field
      * stays at the sentinel otherwise). Restore's edge splice drops them,
@@ -143,6 +164,10 @@ static const VSFrame *VS_CC comp_decode_get_frame(int n, int activation_reason, 
         vsapi->mapSetFloat(props, "CompositeRefineResidual", m.refine_residual, maReplace);
     if (m.refine_correction >= 0.0)
         vsapi->mapSetFloat(props, "CompositeRefineCorrection", m.refine_correction, maReplace);
+    if (maskf) {
+        vsapi->mapConsumeFrame(props, "CompositeMotionMask", maskf, maReplace);
+        maskf = NULL;
+    }
 
     if (orig)
         vsapi->freeFrame(orig);
@@ -244,6 +269,78 @@ static VSNode *comp_pad_h(VSNode *node, VSCore *core, const VSAPI *vsapi)
     VSNode *padded = vsapi->mapGetNode(ret, "clip", 0, NULL);
     vsapi->freeMap(ret);
     return padded;
+}
+
+/* Pull the raster motion mask (a GRAY16 frame the decode node attached
+ * under CompositeMotionMask) out as its own clip via std.PropToClip, and
+ * strip that heavy frame-typed prop off the picture path: *dec is replaced
+ * with a RemoveFrameProps-wrapped node so the picture output does not carry
+ * the mask frame (Spline36 would otherwise propagate it). Consumes *dec,
+ * setting it to the stripped node; returns the mask node (NULL on failure,
+ * with *dec freed). Both nodes ultimately hit the one decode getFrame for
+ * frame n, which the cache dedups under linear access. */
+static VSNode *comp_mask_from_props(VSNode **dec, VSCore *core, const VSAPI *vsapi)
+{
+    VSPlugin *std = vsapi->getPluginByID("com.vapoursynth.std", core);
+    VSNode *d = *dec;
+    *dec = NULL;
+
+    VSMap *args = vsapi->createMap();
+    vsapi->mapSetNode(args, "clip", d, maReplace);
+    vsapi->mapSetData(args, "prop", "CompositeMotionMask", -1, dtUtf8, maReplace);
+    VSMap *ret = vsapi->invoke(std, "PropToClip", args);
+    vsapi->freeMap(args);
+    if (vsapi->mapGetError(ret)) {
+        vsapi->freeMap(ret);
+        vsapi->freeNode(d);
+        return NULL;
+    }
+    VSNode *mask = vsapi->mapGetNode(ret, "clip", 0, NULL);
+    vsapi->freeMap(ret);
+
+    /* strip the attached mask frame off the picture node */
+    args = vsapi->createMap();
+    vsapi->mapConsumeNode(args, "clip", d, maReplace);
+    vsapi->mapSetData(args, "props", "CompositeMotionMask", -1, dtUtf8, maReplace);
+    ret = vsapi->invoke(std, "RemoveFrameProps", args);
+    vsapi->freeMap(args);
+    if (vsapi->mapGetError(ret)) {
+        vsapi->freeMap(ret);
+        vsapi->freeNode(mask);
+        return NULL;
+    }
+    *dec = vsapi->mapGetNode(ret, "clip", 0, NULL);
+    vsapi->freeMap(ret);
+    return mask;
+}
+
+/* Resample the raster motion mask to the output geometry on the SAME crop
+ * as the picture (identical src_left/src_width/width so it stays sample-
+ * aligned), but with bilinear — Spline36's lobes ring a 0/1 mask edge.
+ * Consumes mask, also on failure. */
+static VSNode *comp_resample_mask(VSNode *mask, VSCore *core, const VSAPI *vsapi,
+                                  int width, int height,
+                                  double src_left, double src_width)
+{
+    VSPlugin *resize = vsapi->getPluginByID("com.vapoursynth.resize", core);
+    VSNode *padded = comp_pad_h(mask, core, vsapi);
+    if (!padded)
+        return NULL;
+    VSMap *args = vsapi->createMap();
+    vsapi->mapConsumeNode(args, "clip", padded, maReplace);
+    vsapi->mapSetInt(args, "width", width, maReplace);
+    vsapi->mapSetInt(args, "height", height, maReplace);
+    vsapi->mapSetFloat(args, "src_left", src_left, maReplace);
+    vsapi->mapSetFloat(args, "src_width", src_width, maReplace);
+    VSMap *ret = vsapi->invoke(resize, "Bilinear", args);
+    vsapi->freeMap(args);
+    if (vsapi->mapGetError(ret)) {
+        vsapi->freeMap(ret);
+        return NULL;
+    }
+    VSNode *out = vsapi->mapGetNode(ret, "clip", 0, NULL);
+    vsapi->freeMap(ret);
+    return out;
 }
 
 static void VS_CC comp_encode_create(const VSMap *in, VSMap *out, void *user_data, VSCore *core, const VSAPI *vsapi)
@@ -444,6 +541,18 @@ static void VS_CC comp_decode_create(const VSMap *in, VSMap *out, void *user_dat
     if (!resize)
         RETERROR("resize plugin not found");
 
+    /* mask="motion": emit the motion-router mask as a second output clip.
+     * Only the NTSC hybrid path has a router. */
+    const char *maskmode = vsapi->mapGetData(in, "mask", 0, &err);
+    if (!err && maskmode) {
+        if (strcmp(maskmode, "motion") != 0)
+            RETERROR("mask must be \"motion\"");
+        if (!(d.standard == COMP_STD_NTSC && dimensions == 3 && transform == 2))
+            RETERROR("mask=\"motion\" needs the ntsc hybrid path "
+                     "(dimensions=3, transform=2)");
+        d.want_mask = 1;
+    }
+
     VSCoreInfo info;
     vsapi->getCoreInfo(core, &info);
 
@@ -514,6 +623,18 @@ static void VS_CC comp_decode_create(const VSMap *in, VSMap *out, void *user_dat
         return;
     }
 
+    /* mask="motion": pull the attached motion mask out as its own clip
+     * before the picture path consumes dec_node; both share one decode */
+    VSNode *mask_node = NULL;
+    if (data->want_mask) {
+        mask_node = comp_mask_from_props(&dec_node, core, vsapi);
+        if (!mask_node) {
+            vsapi->freeNode(dec_node);
+            vsapi->mapSetError(out, "Decode: mask extraction failed");
+            return;
+        }
+    }
+
     /* resample back to the BT.601 raster: the exact inverse of Encode's
      * mapping. The 601 window is wider in time than the active raster,
      * so the outermost samples come from replicated edge padding. */
@@ -544,6 +665,18 @@ static void VS_CC comp_decode_create(const VSMap *in, VSMap *out, void *user_dat
     VSNode *res_node = vsapi->mapGetNode(ret, "clip", 0, NULL);
     vsapi->freeMap(ret);
     vsapi->mapConsumeNode(out, "clip", res_node, maReplace);
+
+    /* second output: the motion mask, resampled to the output geometry on
+     * the same crop as the picture (bilinear; see comp_resample_mask) */
+    if (mask_node) {
+        VSNode *rmask = comp_resample_mask(mask_node, core, vsapi, width,
+                                           d.vi.height, dst_left, dst_width);
+        if (!rmask) {
+            vsapi->mapSetError(out, "Decode: mask resample failed");
+            return;
+        }
+        vsapi->mapConsumeNode(out, "clip", rmask, maAppend);
+    }
 }
 
 
@@ -679,6 +812,18 @@ static void VS_CC comp_restore_create(const VSMap *in, VSMap *out, void *user_da
     if (!resize)
         RETERROR("resize plugin not found");
 
+    /* mask="motion": emit the motion-router mask as a second output clip.
+     * Only the NTSC hybrid path has a router. */
+    const char *maskmode = vsapi->mapGetData(in, "mask", 0, &err);
+    if (!err && maskmode) {
+        if (strcmp(maskmode, "motion") != 0)
+            RETERROR("mask must be \"motion\"");
+        if (!(d.standard == COMP_STD_NTSC && dimensions == 3 && transform == 2))
+            RETERROR("mask=\"motion\" needs the ntsc hybrid path "
+                     "(dimensions=3, transform=2)");
+        d.want_mask = 1;
+    }
+
     /* stage 1: the picture on the 4xfsc raster (also the refine anchor) */
     int rwidth;
     double fwd_left, fwd_width;
@@ -798,6 +943,21 @@ static void VS_CC comp_restore_create(const VSMap *in, VSMap *out, void *user_da
         vsapi->mapSetError(out, "Restore: failed to create filter");
         return;
     }
+
+    /* mask="motion": pull the attached raster motion mask out as its own
+     * clip (the picture path below uses dec_node unchanged; both share the
+     * one decode). It gets its own bilinear resample on the SAME crop
+     * geometry and is appended as a second output clip. */
+    VSNode *mask_node = NULL;
+    if (data->want_mask) {
+        mask_node = comp_mask_from_props(&dec_node, core, vsapi);
+        if (!mask_node) {
+            vsapi->freeNode(dec_node);
+            vsapi->mapSetError(out, "Restore: mask extraction failed");
+            return;
+        }
+    }
+
     /* the decode node carries the separation-confidence props; the edge
      * splice below (std.StackHorizontal) would inherit props from the
      * propless source-edge clip instead, so keep a reference to copy them
@@ -935,6 +1095,18 @@ static void VS_CC comp_restore_create(const VSMap *in, VSMap *out, void *user_da
         vsapi->freeNode(conf_src);
     }
     vsapi->mapConsumeNode(out, "clip", res_node, maReplace);
+
+    /* second output: the motion mask, resampled to the output geometry on
+     * the same crop as the picture (bilinear; see comp_resample_mask) */
+    if (mask_node) {
+        VSNode *rmask = comp_resample_mask(mask_node, core, vsapi, width,
+                                           d.vi.height, dst_left, dst_width);
+        if (!rmask) {
+            vsapi->mapSetError(out, "Restore: mask resample failed");
+            return;
+        }
+        vsapi->mapConsumeNode(out, "clip", rmask, maAppend);
+    }
 }
 
 VS_EXTERNAL_API(void) VapourSynthPluginInit2(VSPlugin *plugin, const VSPLUGINAPI *vspapi)
@@ -962,8 +1134,9 @@ VS_EXTERNAL_API(void) VapourSynthPluginInit2(VSPlugin *plugin, const VSPLUGINAPI
                              "level:int:opt;"
                              "lut:float[]:opt;"
                              "evidence:float:opt;"
-                             "cti:int:opt;",
-                             "clip:vnode;",
+                             "cti:int:opt;"
+                             "mask:data:opt;",
+                             "clip:vnode[];",
                              comp_decode_create, (void *)"Decode", plugin);
     vspapi->registerFunction("Restore",
                              "clip:vnode;"
@@ -980,7 +1153,8 @@ VS_EXTERNAL_API(void) VapourSynthPluginInit2(VSPlugin *plugin, const VSPLUGINAPI
                              "level:int:opt;"
                              "lut:float[]:opt;"
                              "evidence:float:opt;"
-                             "cti:int:opt;",
-                             "clip:vnode;",
+                             "cti:int:opt;"
+                             "mask:data:opt;",
+                             "clip:vnode[];",
                              comp_restore_create, (void *)"Restore", plugin);
 }
