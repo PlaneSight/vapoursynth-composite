@@ -135,6 +135,35 @@ struct comp_frame_view_t {
     ptrdiff_t stride;
 };
 
+/* Per-frame accumulation of the eq=2 separation-confidence map, summed
+ * over exactly the samples the confidence blend consumes (immune to the
+ * stale/partial-fill hazard of the reused conf scratch). Reduced to the
+ * mean and population std-dev reported as frame props. */
+typedef struct comp_conf_acc_t {
+    double sum;
+    double sumsq;
+    uint64_t n;
+} comp_conf_acc_t;
+
+/* Per-frame difficulty/effort metrics reported as optional frame props.
+ * Each field is left at its sentinel (-1) when its path is inactive, so
+ * the caller emits a prop only for the metrics that were computed. None
+ * is a quality score (no clean reference exists during restoration):
+ *  - conf_mean/conf_std: eq=2 separation-confidence map (mean, pop stddev)
+ *  - motion_fraction: NTSC hybrid, fraction of samples the motion router
+ *    judged to be in motion (routed to the transform); 1 = all motion,
+ *    0 = all still
+ *  - refine_residual: refine>0, mean |orig_y - crude(encode(Y))| at the
+ *    final iteration (model misfit left after refinement)
+ *  - refine_correction: refine>0, mean |Y_out - Y_in| (luma moved) */
+typedef struct comp_decode_metrics_t {
+    double conf_mean, conf_std;
+    double motion_fraction;
+    double refine_residual, refine_correction;
+} comp_decode_metrics_t;
+
+#define COMP_METRICS_INIT { -1.0, -1.0, -1.0, -1.0, -1.0 }
+
 typedef struct comp_decode_t comp_decode_t;
 
 struct comp_decode_t {
@@ -214,7 +243,11 @@ int comp_decode_look(const comp_decode_t *d);
  * reference implementation.
  * orig_y, when non-NULL, is the luma plane of the pre-encode degraded
  * picture at the raster; d->refine Landweber iterations then deconvolve
- * the crude-decoder model against it (Y only). */
+ * the crude-decoder model against it (Y only).
+ * metrics, when non-NULL, receives the per-frame difficulty proxies;
+ * each field is written only when its path is active (see
+ * comp_decode_metrics_t), so the caller must init it to
+ * COMP_METRICS_INIT and emit a prop only for fields that changed. */
 void comp_decode_frame(comp_decode_t *d, int frame, int nframes,
                        int rows, int row_off,
                        const comp_frame_view_t *views, const int *view_frames,
@@ -222,6 +255,7 @@ void comp_decode_frame(comp_decode_t *d, int frame, int nframes,
                        const uint16_t *orig_y, ptrdiff_t orig_stride,
                        uint16_t *dsty, ptrdiff_t ystride,
                        uint16_t *dstu, ptrdiff_t ustride,
-                       uint16_t *dstv, ptrdiff_t vstride);
+                       uint16_t *dstv, ptrdiff_t vstride,
+                       comp_decode_metrics_t *metrics);
 
 #endif

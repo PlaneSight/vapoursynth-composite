@@ -586,7 +586,7 @@ comp_pal_demod_fn comp_get_pal_demod_fn(unsigned cpu)
 static void pal_decode_field(const comp_decode_t *d, int frame, int field,
                              const uint16_t *comp, ptrdiff_t comp_stride,
                              const int16_t *chroma, ptrdiff_t chroma_stride,
-                             const float *conf,
+                             const float *conf, comp_conf_acc_t *acc,
                              uint16_t *dsty, ptrdiff_t ystride,
                              uint16_t *dstu, ptrdiff_t ustride,
                              uint16_t *dstv, ptrdiff_t vstride)
@@ -675,6 +675,13 @@ static void pal_decode_field(const comp_decode_t *d, int frame, int field,
                         + (int32_t)(((int64_t)wq * (u_eq[x] - u_nar[x])) >> 15);
                     v_eq[x] = v_nar[x]
                         + (int32_t)(((int64_t)wq * (v_eq[x] - v_nar[x])) >> 15);
+                }
+                if (acc) {
+                    for (int x = 0; x < w; x++) {
+                        acc->sum += cw[x];
+                        acc->sumsq += (double)cw[x] * cw[x];
+                    }
+                    acc->n += w;
                 }
             }
             u_out = u_eq;
@@ -1062,7 +1069,8 @@ static void ntsc_split3d(const comp_decode_t *d, int rows, int row_off,
  * (may be NULL) is the transform's confidence row for the eq=2 blend. */
 static void ntsc_demod_line(const comp_decode_t *d, int frame, int raster_row,
                             const uint16_t *comp_row, const int16_t *chroma_row,
-                            const float *conf, const uint8_t *mask,
+                            const float *conf, comp_conf_acc_t *acc,
+                            const uint8_t *mask,
                             uint16_t *outy, uint16_t *outu, uint16_t *outv)
 {
     const int w = d->width;
@@ -1137,6 +1145,13 @@ static void ntsc_demod_line(const comp_decode_t *d, int frame, int raster_row,
             int32_t u_nar[COMP_ACTIVE_WIDTH_NTSC], v_nar[COMP_ACTIVE_WIDTH_NTSC];
             narrow_row(d, u_row, u_nar, w);
             narrow_row(d, v_row, v_nar, w);
+            if (acc) {
+                for (int x = 0; x < w; x++) {
+                    acc->sum += conf[x];
+                    acc->sumsq += (double)conf[x] * conf[x];
+                }
+                acc->n += w;
+            }
             for (int x = 0; x < w; x++) {
                 const float c2 = conf[x] * conf[x];
                 int32_t wq = (int32_t)lrintf(c2 * c2 * 32768.0f);
@@ -1277,13 +1292,15 @@ static void refine_luma(const comp_decode_t *d, comp_decode_scratch_t *s,
                         const uint16_t *orig_y, ptrdiff_t orig_stride,
                         uint16_t *dsty, ptrdiff_t ystride,
                         uint16_t *dstu, ptrdiff_t ustride,
-                        uint16_t *dstv, ptrdiff_t vstride)
+                        uint16_t *dstv, ptrdiff_t vstride,
+                        double *out_residual, double *out_correction)
 {
     const int w = d->width;
     const size_t plane = (size_t)w * d->height;
     uint16_t *est = s->refine;                   /* current YUV estimate */
     uint16_t *comp2 = s->refine + 3 * plane;     /* recomposite */
     uint16_t *cru = s->refine + 4 * plane;       /* crude Y of recomposite */
+    double residual_sum = 0.0;
 
     for (int r = 0; r < rows; r++) {
         memcpy(est + r * w, dsty + r * ystride, sizeof(uint16_t) * w);
@@ -1292,6 +1309,8 @@ static void refine_luma(const comp_decode_t *d, comp_decode_scratch_t *s,
     }
 
     for (int it = 0; it < d->refine; it++) {
+        const int last = it == d->refine - 1;
+        residual_sum = 0.0;
         for (int r = 0; r < rows; r++)
             comp_encode_line(&d->enc, comp2 + r * w,
                              est + r * w, est + plane + r * w, est + 2 * plane + r * w,
@@ -1302,13 +1321,34 @@ static void refine_luma(const comp_decode_t *d, comp_decode_scratch_t *s,
             const uint16_t *oy = orig_y + r * orig_stride;
             uint16_t *ey = est + r * w;
             const uint16_t *cy = cru + r * w;
-            for (int x = 0; x < w; x++)
-                ey[x] = clamp_u16((int32_t)ey[x] + (int32_t)oy[x] - (int32_t)cy[x]);
+            for (int x = 0; x < w; x++) {
+                const int32_t resid = (int32_t)oy[x] - (int32_t)cy[x];
+                if (last)               /* model misfit remaining this frame */
+                    residual_sum += resid < 0 ? -resid : resid;
+                ey[x] = clamp_u16((int32_t)ey[x] + resid);
+            }
+        }
+    }
+
+    /* correction magnitude: how far the loop moved luma from the decode
+     * (dsty still holds the pre-refine luma until we overwrite it below) */
+    double correction_sum = 0.0;
+    for (int r = 0; r < rows; r++) {
+        const uint16_t *in = dsty + r * ystride;
+        const uint16_t *ey = est + r * w;
+        for (int x = 0; x < w; x++) {
+            const int32_t dlt = (int32_t)ey[x] - (int32_t)in[x];
+            correction_sum += dlt < 0 ? -dlt : dlt;
         }
     }
 
     for (int r = 0; r < rows; r++)
         memcpy(dsty + r * ystride, est + r * w, sizeof(uint16_t) * w);
+
+    if (out_residual)
+        *out_residual = residual_sum / ((double)rows * w);
+    if (out_correction)
+        *out_correction = correction_sum / ((double)rows * w);
 }
 
 void comp_decode_frame(comp_decode_t *d, int frame, int nframes,
@@ -1318,12 +1358,16 @@ void comp_decode_frame(comp_decode_t *d, int frame, int nframes,
                        const uint16_t *orig_y, ptrdiff_t orig_stride,
                        uint16_t *dsty, ptrdiff_t ystride,
                        uint16_t *dstu, ptrdiff_t ustride,
-                       uint16_t *dstv, ptrdiff_t vstride)
+                       uint16_t *dstv, ptrdiff_t vstride,
+                       comp_decode_metrics_t *metrics)
 {
     comp_decode_scratch_t *s = scratch_acquire(d);
     const int w = d->width;
     const uint16_t *comp = views[look].data;
     const ptrdiff_t comp_stride = views[look].stride;
+    comp_conf_acc_t acc = { 0.0, 0.0, 0 };
+    /* the confidence map exists only at eq=2; accumulate only then */
+    comp_conf_acc_t *pacc = (metrics && d->eq == 2 && s->conf) ? &acc : NULL;
 
     if (d->dimensions == 1) {
         crude_decode_frame(d, frame, rows, row_off, 1, comp, comp_stride,
@@ -1380,7 +1424,7 @@ void comp_decode_frame(comp_decode_t *d, int frame, int nframes,
             pal_decode_field(d, frame, field,
                              comp + field * comp_stride, 2 * comp_stride,
                              s->chroma + field * w, 2 * w,
-                             s->conf ? s->conf + field * w : NULL,
+                             s->conf ? s->conf + field * w : NULL, pacc,
                              dsty, ystride, dstu, ustride, dstv, vstride);
         }
     } else {
@@ -1466,7 +1510,7 @@ void comp_decode_frame(comp_decode_t *d, int frame, int nframes,
         for (int r = 0; r < rows; r++)
             ntsc_demod_line(d, frame, r + row_off,
                             comp + r * comp_stride, s->chroma + r * w,
-                            s->conf ? s->conf + r * w : NULL,
+                            s->conf ? s->conf + r * w : NULL, pacc,
                             d->use_transform == 2 ? s->mask + r * w : NULL,
                             dsty + r * ystride, dstu + r * ustride,
                             dstv + r * vstride);
@@ -1474,7 +1518,32 @@ void comp_decode_frame(comp_decode_t *d, int frame, int nframes,
 
     if (d->refine > 0 && orig_y)
         refine_luma(d, s, frame, rows, row_off, orig_y, orig_stride,
-                    dsty, ystride, dstu, ustride, dstv, vstride);
+                    dsty, ystride, dstu, ustride, dstv, vstride,
+                    metrics ? &metrics->refine_residual : NULL,
+                    metrics ? &metrics->refine_correction : NULL);
+
+    if (pacc && acc.n) {
+        const double mean = acc.sum / (double)acc.n;
+        double var = acc.sumsq / (double)acc.n - mean * mean;
+        if (var < 0.0)                  /* guard fp cancellation near zero */
+            var = 0.0;
+        metrics->conf_mean = mean;
+        metrics->conf_std = sqrt(var);
+    }
+
+    /* NTSC hybrid: fraction of samples the motion router sent to the
+     * transform, i.e. judged to be in motion (mask 1 = still -> comb, so
+     * motion is mask 0). s->mask is filled only on the transform=2 path. */
+    if (metrics && d->standard == COMP_STD_NTSC && d->dimensions == 3
+        && d->use_transform == 2 && s->mask) {
+        uint64_t motion = 0;
+        for (int r = 0; r < rows; r++) {
+            const uint8_t *mk = s->mask + r * w;
+            for (int x = 0; x < w; x++)
+                motion += mk[x] == 0;
+        }
+        metrics->motion_fraction = (double)motion / ((double)rows * w);
+    }
 
     scratch_release(d, s);
 }

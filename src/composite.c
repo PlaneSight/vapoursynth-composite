@@ -119,13 +119,30 @@ static const VSFrame *VS_CC comp_decode_get_frame(int n, int activation_reason, 
     const VSFrame *orig = f->orig_node ? vsapi->getFrameFilter(n, f->orig_node, frame_ctx) : NULL;
     VSFrame *dst = vsapi->newVideoFrame(&f->vi.format, f->vi.width, f->vi.height, src, core);
 
+    comp_decode_metrics_t m = COMP_METRICS_INIT;
     comp_decode_frame(f->dec, n, f->in_frames, f->vi.height, comp_row_offset(f, src, vsapi),
                       views, view_frames, look,
                       orig ? (const uint16_t *)vsapi->getReadPtr(orig, 0) : NULL,
                       orig ? vsapi->getStride(orig, 0) / 2 : 0,
                       (uint16_t *)vsapi->getWritePtr(dst, 0), vsapi->getStride(dst, 0) / 2,
                       (uint16_t *)vsapi->getWritePtr(dst, 1), vsapi->getStride(dst, 1) / 2,
-                      (uint16_t *)vsapi->getWritePtr(dst, 2), vsapi->getStride(dst, 2) / 2);
+                      (uint16_t *)vsapi->getWritePtr(dst, 2), vsapi->getStride(dst, 2) / 2,
+                      &m);
+
+    /* each difficulty prop exists only where its path is active (the field
+     * stays at the sentinel otherwise). Restore's edge splice drops them,
+     * so its create function copies them back onto the spliced output. */
+    VSMap *props = vsapi->getFramePropertiesRW(dst);
+    if (m.conf_mean >= 0.0) {
+        vsapi->mapSetFloat(props, "CompositeSeparationConfidenceMean", m.conf_mean, maReplace);
+        vsapi->mapSetFloat(props, "CompositeSeparationConfidenceStdDev", m.conf_std, maReplace);
+    }
+    if (m.motion_fraction >= 0.0)
+        vsapi->mapSetFloat(props, "CompositeMotionFraction", m.motion_fraction, maReplace);
+    if (m.refine_residual >= 0.0)
+        vsapi->mapSetFloat(props, "CompositeRefineResidual", m.refine_residual, maReplace);
+    if (m.refine_correction >= 0.0)
+        vsapi->mapSetFloat(props, "CompositeRefineCorrection", m.refine_correction, maReplace);
 
     if (orig)
         vsapi->freeFrame(orig);
@@ -781,6 +798,11 @@ static void VS_CC comp_restore_create(const VSMap *in, VSMap *out, void *user_da
         vsapi->mapSetError(out, "Restore: failed to create filter");
         return;
     }
+    /* the decode node carries the separation-confidence props; the edge
+     * splice below (std.StackHorizontal) would inherit props from the
+     * propless source-edge clip instead, so keep a reference to copy them
+     * back onto the spliced output */
+    VSNode *conf_src = vsapi->addNodeRef(dec_node);
 
     /* stage 4: back to the caller's raster */
     VSNode *padded = comp_pad_h(dec_node, core, vsapi);
@@ -881,11 +903,36 @@ static void VS_CC comp_restore_create(const VSMap *in, VSMap *out, void *user_da
                 vsapi->freeNode(parts[i]);
         }
         if (fail || !res_node) {
+            vsapi->freeNode(conf_src);
             vsapi->mapSetError(out, "Restore: edge splice failed");
             return;
         }
+        /* restore the confidence props the stack dropped (copies only the
+         * two named props, leaving _Matrix/_ChromaLocation/etc. intact;
+         * a no-op on non-eq2 output where the source has no such props) */
+        args = vsapi->createMap();
+        vsapi->mapConsumeNode(args, "clip", res_node, maReplace);
+        vsapi->mapConsumeNode(args, "prop_src", conf_src, maReplace);
+        conf_src = NULL;
+        vsapi->mapSetData(args, "props", "CompositeSeparationConfidenceMean", -1,
+                          dtUtf8, maReplace);
+        vsapi->mapSetData(args, "props", "CompositeSeparationConfidenceStdDev", -1,
+                          dtUtf8, maAppend);
+        vsapi->mapSetData(args, "props", "CompositeMotionFraction", -1, dtUtf8, maAppend);
+        vsapi->mapSetData(args, "props", "CompositeRefineResidual", -1, dtUtf8, maAppend);
+        vsapi->mapSetData(args, "props", "CompositeRefineCorrection", -1, dtUtf8, maAppend);
+        ret = vsapi->invoke(std, "CopyFrameProps", args);
+        vsapi->freeMap(args);
+        if (vsapi->mapGetError(ret)) {
+            vsapi->mapSetError(out, "Restore: confidence prop copy failed");
+            vsapi->freeMap(ret);
+            return;
+        }
+        res_node = vsapi->mapGetNode(ret, "clip", 0, NULL);
+        vsapi->freeMap(ret);
     } else {
         vsapi->freeNode(source);
+        vsapi->freeNode(conf_src);
     }
     vsapi->mapConsumeNode(out, "clip", res_node, maReplace);
 }

@@ -276,6 +276,32 @@ override the built-in trained tables; see the comments in
 `test/calibrate_thresholds.py`. `level=1` is the robust untrained
 alternative to the trained tables on synthetic extremes.
 
+## Frame properties
+
+`Decode` and `Restore` tag each output frame with a few read-only
+diagnostics — how hard the decode was, per frame. They are *difficulty*
+signals, not quality scores: there is no clean reference to score
+against during restoration, so these report the decoder's own effort and
+confidence, which correlate with where artifacts are likely to remain.
+Read them in a script to log, plot, or gate later processing (for
+example, denoise harder on low-confidence frames).
+
+Each property appears **only when the path that produces it is active**,
+so its presence is itself informative. In VapourSynth they are on
+`frame.props`; in AviSynth+ read them with `propGetFloat`.
+
+| Property | Present when | Meaning |
+|---|---|---|
+| `CompositeSeparationConfidenceMean` | `eq=2` (the default on transform paths) | Mean of the separator's per-sample confidence, ~0–1. Near 1 where chroma separated cleanly; low where luma leaked into chroma (rainbow-prone content). Lower = a harder frame. |
+| `CompositeSeparationConfidenceStdDev` | `eq=2` | Spread of that confidence across the frame. High std means the trouble is localized (a few bad regions) rather than uniform. |
+| `CompositeMotionFraction` | NTSC `dimensions=3`, `transform=2` (the default) | Fraction of samples the motion router judged to be in motion (and sent to the transform), 0–1. Near 0 = a nearly still frame (the comb handled it); near 1 = mostly motion. |
+| `CompositeRefineResidual` | `Restore` with `refine>0` (the default) | Mean luma the crude-decoder model still cannot reproduce after refinement. High = the source's original decoder was unlike the model, so refine could only partly fit it. |
+| `CompositeRefineCorrection` | `Restore` with `refine>0` | Mean amount `refine` moved the luma. Large = a lot of softened detail was recovered. (Equal to the residual at `refine=1`; they diverge at higher counts as the residual falls and the total correction grows.) |
+
+All values are per frame and computed over the active picture. Absent
+properties simply mean that path was not taken (for example, no
+`CompositeMotionFraction` on PAL, or no refine properties at `refine=0`).
+
 ## Encode
 
 ```python

@@ -471,4 +471,41 @@ for bad_kw, needle in ((dict(eq=3), 'eq must be'),
     else:
         assert False, f'expected error: {needle}'
 
+# ---- difficulty frame props: present only where their path is active,
+# absent otherwise (the absence is part of the contract), values in range
+CONF = ('CompositeSeparationConfidenceMean', 'CompositeSeparationConfidenceStdDev')
+enc9 = core.composite.Encode(bff9, standard='ntsc')
+
+# NTSC hybrid Restore (the default: eq=2, transform=2, refine=1) has all five
+rprops = core.composite.Restore(bff9, standard='ntsc').get_frame(4).props
+for k in CONF + ('CompositeMotionFraction', 'CompositeRefineResidual',
+                 'CompositeRefineCorrection'):
+    assert k in rprops, ('restore missing', k)
+for k in CONF:
+    assert 0.0 <= rprops[k] <= 1.0, (k, rprops[k])
+assert 0.0 <= rprops['CompositeMotionFraction'] <= 1.0
+assert rprops['CompositeRefineResidual'] >= 0.0 and rprops['CompositeRefineCorrection'] >= 0.0
+
+# Decode (no refine anchor): confidence + motion fraction, but no refine props
+dprops = core.composite.Decode(enc9, standard='ntsc').get_frame(4).props
+assert all(k in dprops for k in CONF + ('CompositeMotionFraction',))
+assert 'CompositeRefineResidual' not in dprops and 'CompositeRefineCorrection' not in dprops
+
+# eq=1 has no confidence map -> no confidence props
+eq1 = core.composite.Decode(enc9, standard='ntsc', dimensions=2, eq=1).get_frame(4).props
+assert not any(k in eq1 for k in CONF), 'eq=1 should have no confidence props'
+
+# non-hybrid NTSC (transform=1) has no motion router -> no motion fraction
+tf1 = core.composite.Decode(enc9, standard='ntsc', transform=1).get_frame(4).props
+assert 'CompositeMotionFraction' not in tf1, 'transform=1 should have no motion fraction'
+
+# PAL has no motion router either
+pprops = core.composite.Restore(flat([30000, 40960, 28672]), standard='pal').get_frame(0).props
+assert 'CompositeMotionFraction' not in pprops, 'PAL should have no motion fraction'
+assert all(k in pprops for k in CONF)
+
+# refine=0 drops the refine props
+r0 = core.composite.Restore(bff9, standard='ntsc', refine=0).get_frame(4).props
+assert 'CompositeRefineResidual' not in r0 and 'CompositeRefineCorrection' not in r0
+
 print('test_composite: all tests passed')

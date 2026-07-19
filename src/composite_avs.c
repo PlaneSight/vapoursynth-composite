@@ -140,6 +140,7 @@ static AVS_VideoFrame *AVSC_CC comp_avs_dec_get_frame(AVS_FilterInfo *fi, int n)
      * window. */
     AVS_VideoFrame *anchor = f->anchor ? avs_get_frame(f->anchor, n) : NULL;
 
+    comp_decode_metrics_t mt = COMP_METRICS_INIT;
     comp_decode_frame(&f->dec, n, f->in_frames, f->height,
                       comp_avs_row_offset(f->standard, f->height, env, src),
                       views, view_frames, look,
@@ -150,7 +151,24 @@ static AVS_VideoFrame *AVSC_CC comp_avs_dec_get_frame(AVS_FilterInfo *fi, int n)
                       (uint16_t *)avs_get_write_ptr_p(dst, AVS_PLANAR_U),
                       avs_get_pitch_p(dst, AVS_PLANAR_U) / 2,
                       (uint16_t *)avs_get_write_ptr_p(dst, AVS_PLANAR_V),
-                      avs_get_pitch_p(dst, AVS_PLANAR_V) / 2);
+                      avs_get_pitch_p(dst, AVS_PLANAR_V) / 2,
+                      &mt);
+
+    /* each difficulty prop exists only where its path is active. The
+     * resample and the Restore edge-splice drop these downstream; the
+     * create functions copy them back from this pre-resample clip
+     * (comp_avs_copy_conf_props). */
+    AVS_Map *props = avs_get_frame_props_rw(env, dst);
+    if (mt.conf_mean >= 0.0) {
+        avs_prop_set_float(env, props, "CompositeSeparationConfidenceMean", mt.conf_mean, 0);
+        avs_prop_set_float(env, props, "CompositeSeparationConfidenceStdDev", mt.conf_std, 0);
+    }
+    if (mt.motion_fraction >= 0.0)
+        avs_prop_set_float(env, props, "CompositeMotionFraction", mt.motion_fraction, 0);
+    if (mt.refine_residual >= 0.0)
+        avs_prop_set_float(env, props, "CompositeRefineResidual", mt.refine_residual, 0);
+    if (mt.refine_correction >= 0.0)
+        avs_prop_set_float(env, props, "CompositeRefineCorrection", mt.refine_correction, 0);
 
     if (anchor)
         avs_release_video_frame(anchor);
@@ -416,6 +434,9 @@ static double comp_avs_opt_float(AVS_Value args, int idx, double def)
     return avs_defined(v) ? avs_as_float(v) : def;
 }
 
+static AVS_Value comp_avs_copy_conf_props(AVS_ScriptEnvironment *env,
+                                          AVS_Value dst, AVS_Value src);
+
 /* Decode(clip, standard, width, threshold, setup, dimensions, eq,
  *        thresholds, transform, level, lut, evidence, cti)
  * arg indices:  0      1       2      3       4       5      6
@@ -609,8 +630,16 @@ static AVS_Value AVSC_CC comp_avs_dec_create(AVS_ScriptEnvironment *env,
     AVS_Value dec_v;
     avs_set_to_clip(&dec_v, dec_clip);
     avs_release_clip(dec_clip);
-    AVS_Value ret = comp_avs_resample_back(env, dec_v, "Decode", standard,
-                                           width, in_h);
+    AVS_Value resampled = comp_avs_resample_back(env, dec_v, "Decode", standard,
+                                                 width, in_h);
+    if (avs_is_error(resampled)) {
+        avs_release_value(dec_v);
+        return resampled;
+    }
+    /* copy the confidence props the resample may drop, from the pre-resample
+     * decode clip (matches Restore and the VS side) */
+    AVS_Value ret = comp_avs_copy_conf_props(env, resampled, dec_v);
+    avs_release_value(resampled);
     avs_release_value(dec_v);
     return ret;
 }
@@ -693,6 +722,35 @@ static AVS_Value comp_avs_edge_splice(AVS_ScriptEnvironment *env, AVS_Value rest
     for (int i = 0; i < np; i++)
         avs_release_value(parts[i]);
     return ret;
+}
+
+/* Copy the difficulty-metric props (separation confidence, comb fraction,
+ * refine residual/correction) from the pre-resample decode clip `src`
+ * onto `dst` (merge, so _Matrix/_ChromaLocation stay intact); a no-op for
+ * any that are absent. Both the resample (z_ConvertFormat) and
+ * the Restore edge splice (StackHorizontal inherits props from its first,
+ * propless child) drop these downstream; copying from the pre-resample
+ * decode clip — which carries them straight from the getframe — is
+ * robust to both, and matches the VS side copying from dec_node.
+ * propCopy is per-frame-n and dimension-independent, so the geometry
+ * mismatch between src and dst is fine. Consumes neither. */
+static AVS_Value comp_avs_copy_conf_props(AVS_ScriptEnvironment *env,
+                                          AVS_Value dst, AVS_Value src)
+{
+    AVS_Value pnames[5] = {
+        avs_new_value_string("CompositeSeparationConfidenceMean"),
+        avs_new_value_string("CompositeSeparationConfidenceStdDev"),
+        avs_new_value_string("CompositeMotionFraction"),
+        avs_new_value_string("CompositeRefineResidual"),
+        avs_new_value_string("CompositeRefineCorrection"),
+    };
+    AVS_Value args[4];
+    const char *names[4];
+    args[0] = dst;                             names[0] = NULL;
+    args[1] = src;                             names[1] = NULL;
+    args[2] = avs_new_value_bool(1);           names[2] = "merge";
+    args[3] = avs_new_value_array(pnames, 5);  names[3] = "props";
+    return avs_invoke(env, "propCopy", avs_new_value_array(args, 4), names);
 }
 
 /* Restore(clip, standard, width, threshold, setup, dimensions, eq, refine,
@@ -908,26 +966,39 @@ static AVS_Value AVSC_CC comp_avs_res_create(AVS_ScriptEnvironment *env,
      * outer columns through from the source. */
     AVS_Value restored = comp_avs_resample_back(env, dec_v, "Restore", standard,
                                                 width, in_h);
-    avs_release_value(dec_v);
-    if (avs_is_error(restored))
+    if (avs_is_error(restored)) {
+        avs_release_value(dec_v);
         return restored;
+    }
 
     int nl, nr;
     comp_decode_edge_columns(standard, width, rwidth, &nl, &nr);
-    if (nl == 0 && nr == 0)
-        return restored;
-
-    /* plain resize of the source to the output geometry for the spliced
-     * edge columns (no subpixel crop; matches the VS plugin) */
-    AVS_Value src444 = comp_avs_zresize(env, clip_v, "Restore", width, in_h,
-                                        "YUV444P16", 0.0 / 0.0, 0.0 / 0.0);
-    if (avs_is_error(src444)) {
+    AVS_Value spliced;
+    if (nl == 0 && nr == 0) {
+        spliced = restored;
+    } else {
+        /* plain resize of the source to the output geometry for the spliced
+         * edge columns (no subpixel crop; matches the VS plugin) */
+        AVS_Value src444 = comp_avs_zresize(env, clip_v, "Restore", width, in_h,
+                                            "YUV444P16", 0.0 / 0.0, 0.0 / 0.0);
+        if (avs_is_error(src444)) {
+            avs_release_value(restored);
+            avs_release_value(dec_v);
+            return src444;
+        }
+        spliced = comp_avs_edge_splice(env, restored, src444, width, nl, nr);
         avs_release_value(restored);
-        return src444;
+        avs_release_value(src444);
+        if (avs_is_error(spliced)) {
+            avs_release_value(dec_v);
+            return spliced;
+        }
     }
-    AVS_Value ret = comp_avs_edge_splice(env, restored, src444, width, nl, nr);
-    avs_release_value(restored);
-    avs_release_value(src444);
+
+    /* restore the confidence props both the resample and the splice drop */
+    AVS_Value ret = comp_avs_copy_conf_props(env, spliced, dec_v);
+    avs_release_value(spliced);
+    avs_release_value(dec_v);
     return ret;
 }
 
