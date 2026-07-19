@@ -473,14 +473,32 @@ meson test -C build
 
 Requires Meson, a C99 compiler, FFTW3 (single precision), and
 VapourSynth (V4 API) with the Python module available for header
-discovery. The AviSynth+ frontend is built by default
-(`-Davisynth=true`); it shares the one module.
+discovery. Add `-Davisynth=true` to also build the AviSynth+ frontend
+into the same module (the release wheels enable it).
 
-End-to-end plugin tests:
+End-to-end plugin tests (run by hand; each needs its host at runtime):
 
 ```sh
+# VapourSynth
 python test/test_composite.py build/composite.so
 ```
+
+The AviSynth+ end-to-end test is a C harness that links libavisynth, so
+it is an opt-in build target — point `-Davisynth_lib_dir` at the
+directory holding your `libavisynth.so.N`:
+
+```sh
+meson setup build -Davisynth=true -Davisynth_lib_dir=$LIBAVS
+ninja -C build
+# run against the built module and a working avsresize:
+./build/test_composite_avs build/composite.so /path/to/avsresize.so
+```
+
+It links libavisynth to build and needs a *working* avsresize
+(`z_ConvertFormat`) at runtime for the resampling paths; without one it
+still runs the argument-validation checks. Note some avsresize builds
+export `AVS_linkage` as a global and segfault on load — that is an
+avsresize build issue (relink it with `-Wl,-Bsymbolic`), not this plugin.
 
 ## How it works
 

@@ -132,6 +132,23 @@ test('decode', executable('test_decode',
     link_with: core,
 ))
 
+# AviSynth+ end-to-end test. It links an external libavisynth and, at
+# runtime, drives the built plugin through a real avsresize — neither of
+# which the repo vendors or CI provides — so it is an opt-in BUILD target
+# (set -Davisynth_lib_dir=/path/to/libavisynth), not a `meson test` entry.
+# Run it by hand like the VapourSynth test:
+#   ./build/test_composite_avs build/composite.so /path/to/avsresize.so
+avs_lib_dir = get_option('avisynth_lib_dir')
+if avs_lib_dir != ''
+    avisynth_dep = cc.find_library('avisynth', dirs: [avs_lib_dir])
+    executable('test_composite_avs',
+        files('test/test_composite_avs.c'),
+        dependencies: avisynth_dep,
+        include_directories: include_directories('third_party/avisynth'),
+        build_rpath: avs_lib_dir,
+    )
+endif
+
 checkasm_dep = dependency('checkasm', required: get_option('checkasm'), allow_fallback: true)
 if checkasm_dep.found()
     checkasm_exe = executable('checkasm',

@@ -1,2 +1,3 @@
 option('checkasm', type: 'feature', value: 'auto', description: 'Build the checkasm test tool')
 option('avisynth', type: 'boolean', value: false, description: 'Build the AviSynth+ plugin frontend')
+option('avisynth_lib_dir', type: 'string', value: '', description: 'Directory holding libavisynth.so.N; set to build the AviSynth+ end-to-end test (test/test_composite_avs.c). Run it by hand — it needs a working avsresize at runtime.')
