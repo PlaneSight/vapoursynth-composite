@@ -1,176 +1,306 @@
 # vapoursynth-composite
 
-Composite PAL/NTSC encoding and decoding for VapourSynth.
+Clean up cross-color and cross-luma artifacts in old PAL/NTSC footage,
+for VapourSynth and AviSynth+.
 
-Round-tripping component Y'CbCr through a composite encode and a good
-decode removes cross-luma and cross-color artifacts baked in by a bad
-hardware decoder: the re-encode reconstructs the composite signal the
-bad decoder saw, and a Transform/comb decode re-separates it properly.
-The signal processing follows
-[ld-decode](https://github.com/happycube/ld-decode)'s ld-chroma-encoder
-and ld-chroma-decoder, after Clarke, *Colour encoding and decoding
-techniques for line-locked sampled PAL and NTSC television signals*,
-BBC RD 1986/2, with separation modes from GB 2365247 A (Easterbrook)
-and US 7,872,689 (Weston), and decoder adaptivity after Faroudja
-(*NTSC and Beyond*, 1988).
+If your source came off tape or a cheap decoder and has **rainbow
+shimmer on fine detail** (cross-color) or **crawling dots along sharp
+edges** (cross-luma / dot crawl), this plugin can take a lot of it back
+out. It re-encodes the picture to the composite signal the bad decoder
+would have seen, then decodes that signal properly with a comb / Transform
+separator — so the artifacts the original decoder baked in never get
+re-created.
 
-## Usage
+You do not need to understand any of that to use it. Feed a clip to
+`Restore` and get a cleaner clip back.
 
-### Encode
+## Quick start
 
-```python
-comp = core.composite.Encode(clip, standard="pal", setup=0, precomb=0)
-```
-
-Y'CbCr (any constant YUV format) to composite GRAY16 on the 4×fsc
-active raster: PAL 928×576 (levels per EBU Tech 3280), NTSC
-758×480/486 (levels per SMPTE 244M). Subcarrier phase is an exact
-integer function of frame and line, so a later `Decode` demodulates
-with the same sequence.
-
-- `standard` — `"pal"` (default) or `"ntsc"`.
-- `setup` — NTSC only: add the 7.5 IRE pedestal (default off).
-- `precomb` — vertically low-pass U/V across same-field lines before
-  modulation (Poynton's precombing). Useful when encoding clean
-  sources for comb decoders; leave it off in the noise-reduction round
-  trip, where it measurably hurts.
-
-A 480-line NTSC clip occupies the 486-line BFF raster according to its
-`_FieldBased` frame prop: BFF/DV content at rows 4..483, TFF/RP 202 at
-rows 5..484. 486-line input is used as-is.
-
-### Decode
+VapourSynth:
 
 ```python
-out = core.composite.Decode(comp, standard="pal", width=720, dimensions=3,
-                            setup=0, eq=2)
+import vapoursynth as vs
+core = vs.core
+
+clip = core.bs.VideoSource("tape.mkv")   # your NTSC/PAL source
+out  = core.composite.Restore(clip, standard="ntsc")
+out.set_output()
 ```
 
-Composite GRAY16 back to YUV444P16, resampled to `width`. PAL uses
-Transform PAL chroma separation with PALcolour-style demodulation;
-NTSC uses an adaptive line comb, a Transform NTSC separation, or a
-motion-routed hybrid of the two via `transform`. The defaults shown
-are the measured best general configuration; unset parameters adapt
-to the chosen path (picking `dimensions=1` or an NTSC comb quietly
-drops back to the supported behavior, and an explicit `threshold`,
-`thresholds`, `level`, or `lut` selects its own separation mode).
-Transform paths separate with built-in trained soft-gain tables by
-default.
+AviSynth+:
 
-- `width` — output width (default 720); the resample inverts Encode's
-  BT.601↔4×fsc mapping exactly.
-- `dimensions` — `3` (default): spatio-temporal separation (3D
-  Transform PAL / adaptive 3D comb) drawing on neighboring frames;
-  clip-edge frames lean on black temporal padding, and it costs
-  several times 2D's compute. PAL separates on GB 2365247 A's
-  displaced field-line lattice (fields sheared into one dense grid:
-  half the FFT volume of frame-line tiles for equal separation).
-  `2`: the fast 2D separation (spatial tiles / line comb). `1`: a
-  deliberately crude notch decoder — a worst-case reference, and
-  `Restore`'s degradation model.
-- `transform` — NTSC with `dimensions=3` only. `1` replaces the 3D
-  comb with a Transform NTSC separation (stronger on motion). `2`
-  (default there) runs both and routes per sample on a
-  chroma-transparent motion detector: still neighborhoods take the
-  comb (near-exact on static content), moving ones take the
-  transform. `0`: the plain adaptive comb.
-- `threshold` — the transform's bin-symmetry ratio (0.4 is the
-  ld-decode reference value); higher demands more symmetry to call a
-  bin chroma. Passing it selects threshold mode (`level=0`).
-- `thresholds` — per-bin override of the symmetry test (80 values for
-  `dimensions=2`; 384 for PAL `dimensions=3`, 768 for NTSC). For
-  Transform NTSC the values feed the shaped-threshold exponent
-  instead. Calibrated sets trained on the VQEG corpora ship in
-  `test/`: `thresholds_pal_2d.txt` (beats any uniform threshold),
-  `thresholds_pal_3d.txt` (experimental), `thresholds_ntsc.txt`.
-- `level` — amplitude limiting instead of the trained tables or the
-  keep/discard test (GB 2365247 A's preferred embodiment): each bin
-  pair's larger magnitude is reduced to the smaller, phase preserved.
-  The robust untrained mode: nearly the trained tables' equal on real
-  footage, and safer on synthetic extremes.
-- `lut` — trained soft separation (after US 7,872,689): per frequency
-  bin, a gain over the pair-symmetry ratio, 16 knots per bin (1280
-  values for `dimensions=2`; 6144 for PAL `dimensions=3`, 12288 for
-  NTSC; transform separations only).
-  Trained tables are built into the plugin and used by default; `lut`
-  overrides them with your own table. `test/calibrate_thresholds.py`
-  derives tables from a clean corpus in closed form (the shipped
-  tables are `test/lut_pal_{2d,3d}.txt` and `test/lut_ntsc.txt`,
-  embedded via `test/gen_lut_tables.py`). Strongest on natural
-  content; `level=1` is the untrained alternative for synthetic
-  extremes.
-- `eq` — chroma equalization of the known encode+decode filter
-  cascade. `0` off; `1` the fixed inverse, +1.7 dB chroma PSNR on
-  color detail but it amplifies separation leak on near-monochrome
-  content; `2` (default on transform paths) steers total chroma
-  bandwidth per sample by the transform's own pair-symmetry
-  confidence, from a sub-nominal low-pass where the kept chroma is
-  suspect up to the full boosted inverse where it is confirmed — the
-  robust choice for unknown or mixed content. Paths without a
-  transform default to `1`.
-- `evidence` — the low-frequency luma prior of US 7,872,689 (PAL
-  transforms, default 0 = off): pairs whose baseband difference
-  frequency has no LF luma partner are attenuated by
-  `e/(e + evidence*b)`. Around 0.5–1 it cuts residual chroma flicker
-  on artifact-heavy footage with flat and quiet regions untouched, but
-  can soften saturated color edges whose luma is flat.
-- `cti` — luma-guided chroma transient improvement (Faroudja,
-  US 4,504,853; default off): at a coincident transition the chroma
-  edge is resynthesized from the luma edge's profile, restoring edge
-  sharpness beyond the chroma channel bandwidth (color bars gain
-  +6.5 dB V, contained and hue-stable by construction). Meant for
-  graphics-like sources — titles, animation, test material; on natural
-  footage the luma and chroma edges are rarely congruent enough and it
-  measurably hurts, so leave it off there.
-- `setup` — must match the encode.
+```
+BSVideoSource("tape.mkv")
+composite_Restore(standard="ntsc")
+```
 
-### Restore
+That is the whole thing. Everything below is tuning.
+
+## What input it accepts
+
+- **Format:** any constant-format YUV clip (`Restore` and `Encode`
+  resample internally, so 4:2:0, 4:2:2, 8-bit, 10-bit — all fine).
+- **Width:** any width. It is resampled to the composite raster and
+  back; pick your output width with `width=` (default 720).
+- **Height:** this is the one hard rule, because it fixes where the
+  picture sits in the TV raster:
+  - **PAL** — **576 lines**, exactly.
+  - **NTSC** — **480 or 486 lines**. A 480-line clip is placed on the
+    486-line raster automatically from its field order (`_FieldBased`):
+    BFF/DV content at rows 4–483, TFF/RP 202 content at rows 5–484.
+  - Anything else is an error, so resize/pad to 576 or 480/486 first.
+
+Field order matters for NTSC 480-line input — set `_FieldBased` correctly
+(most DV/tape captures are BFF) or the raster placement, and therefore
+the subcarrier phase, will be wrong.
+
+## Restore
 
 ```python
-out = core.composite.Restore(clip, standard="pal", refine=1, ...)
+out = core.composite.Restore(clip, standard="ntsc")
 ```
 
-The whole noise-reduction round trip in one call: resample to the
-raster, re-encode, decode, resample back. Takes every `Decode`
-parameter plus:
+The whole round trip in one call: resample to the composite raster,
+re-encode, decode with a good separator, resample back to `width`. This
+is the function you want for cleanup. It takes every `Decode` parameter
+(see below) plus two of its own:
 
-- `refine` — analysis-by-synthesis iterations (default 1): a Y-only
-  Landweber loop deconvolves a crude-decoder model against the input,
-  recovering luma detail the original decoder attenuated; chroma is
-  untouched. Higher values help static detailed content; the gain
-  scales with how closely the source's decoder resembled a notch.
-- `precomb` — passed to the internal encoder (see `Encode`).
+- `refine` — luma detail recovery, default `1`. A short Y-only loop that
+  recovers luma detail the original decoder softened. Chroma is
+  untouched. `0` disables it; higher values (2–4) push harder on clean,
+  detailed sources. See *About `refine`* below — it is not a sharpener.
+- `precomb` — passed to the internal encoder (see `Encode`); leave it
+  off for cleanup.
+
+Most users only ever set `standard` and maybe `width`. Reach for the
+`Decode` parameters below only if the defaults leave something on the
+table.
+
+### About `refine` (it is not "fake" sharpening)
+
+A sharpener guesses: it finds an edge and adds contrast around it,
+inventing high-frequency content that was never in the signal. `refine`
+does the opposite — it *solves* for the detail that the bad decoder
+attenuated, using the fact that we know exactly how that decoder blurs.
+
+The plugin already has a model of the crude decoder (it's what the round
+trip is built on). `refine` runs a few steps of a constrained
+deconvolution (a Y-only Landweber iteration): it proposes a sharper
+luma, pushes it back through the *modeled* bad decoder, and checks
+whether the result matches the luma you actually captured. It keeps only
+the correction that makes the model reproduce your real footage. Nothing
+is added that isn't required to explain the picture the decoder
+produced — so the recovered detail is inferred from the signal and the
+known blur, not painted on.
+
+We measured this rather than assuming it. On real detailed footage the
+extra high-frequency energy `refine=1` produces moves the image *closer*
+to a clean reference (higher SSIMULACRA2, luma PSNR, and XPSNR), and it
+survives a downstream sharpener — the signature of genuine detail, not
+invented edges. It even reduces the error in flat regions there, the
+opposite of grain amplification.
+
+Two honest limits:
+
+- **How much it helps depends on the source.** The gain scales with how
+  closely the original decoder resembled the notch we model. Clean,
+  detailed, fairly static material benefits most; on soft or heavily
+  processed sources the correction is small.
+- **It is not free on every source.** On grainy consumer tape
+  (VHS/Hi8-class) some of the boosted high frequencies are amplified
+  grain rather than detail, and on flat or graphic content (titles, test
+  patterns, color bars) it can overreach. If your source is grainy and
+  you follow this plugin with an aggressive denoiser, that denoiser
+  removes most of the amplified grain anyway; if your source is
+  graphic/flat, set `refine=0`.
+
+`refine` lives inside `Restore` and cannot be applied later — it is
+anchored to the pre-encode picture, which only exists during the round
+trip. So the choice is simply whether to enable it in that first
+`Restore` call. Because all of the cross-color / dot-crawl removal (the
+plugin's main job) happens independently of `refine`, setting
+`refine=0` costs nothing on artifact cleanup; it only forgoes the luma
+detail recovery. Leave it at `1` for clean detailed sources; set it to
+`0` for grainy tape into a denoiser, for graphic/flat content, or
+whenever you want a conservative default that adds no high frequencies
+of its own.
 
 ## Choosing a decoder mode
 
-Measured on the supervised harness (`test/metrics.py`), VQEG held-out
-clips, and real footage; artifact numbers are chroma HF energy and
-temporal flicker in the worst-artifact regions:
+The defaults are the best general setting and you can stop here. The
+numbers below are for when you want to tune.
 
-- The defaults are the measured best general configuration
-  (`dimensions=3, eq=2`, built-in trained tables, NTSC additionally
-  `transform=2`) — on the reference clip they remove ~41% of hot-spot
-  chroma HF and ~44% of flicker versus doing nothing, where a plain
-  2D threshold decode manages 25%/20%. Add `evidence=1.0` for
-  artifact-heavy material.
-- `dimensions=2` is the fast path, and the right one for stills or
-  very short clips (the 3D window spans ±3 frames).
-- `lut` with the shipped trained tables wins on natural content
-  (best-in-class artifact scores on every held-out VQEG clip) but can
-  overreach on synthetic extremes such as zone plates.
-- NTSC: the default hybrid is never the worst; `transform=0` (comb)
-  is near-exact on fully static content, `transform=1` strongest on
-  motion.
+**How to read the tables.** Every clip is measured as: clean source →
+simulated bad decoder → this plugin → compared back to the clean source
+(`test/readme_tables.py`, built on `test/metrics.py`). *degraded* is the
+artifact-ridden input (doing nothing); *transparency* is the clean
+source run straight through encode/decode with no bad decoder — the PSNR
+ceiling (for the lower-is-better columns it is just a reference, not a
+floor). **chromaHF** is residual chroma high-frequency energy (rainbows /
+dot patterns) and **flicker** is frame-to-frame chroma change (crawl);
+for both, **lower is better**, and the `%` is how much of the artifact
+each mode removed versus *degraded*. PSNR is fidelity to the clean
+source in dB (higher is better).
+
+Modes are compared through `Decode`; `Restore` adds a Y-only detail
+recovery (`refine`) on top, so under `Restore` the luma PSNR is higher
+and the chroma numbers here are unchanged. Each mode is measured at its
+own defaults, so the comb rows use `eq=1` (the no-transform default) and
+the transform/hybrid rows use `eq=2` — part of the comb's higher
+chromaHF is that equalization choice, not the separator itself.
+
+Corpora: **VQEG** rows are held-out clips (`src20–22`) the shipped
+trained tables were *not* trained on — the generalization number.
+**BT.802** is the NTSC restoration-target corpus the tables were tuned
+on, split into **stills** (Rec. BT.802 scenes 1–13, single frame — every
+temporal metric is trivially flat, so this is the easy case) and
+**motion** (scenes 14+, real footage). The never-trained VQEG held-out
+and the tuned-on BT.802-motion rows agree closely (chromaHF −73% vs
+−75%; flicker −82% vs −73%, the same ballpark) — the evidence the
+separation generalizes. **bars** is SMPTE EG-1 / EBU color
+bars (flat color fidelity) and **zone** is a zone-plate sweep — a pure
+cross-color torture test.
+
+### NTSC
+
+On real footage the defaults remove about **73–75% of the rainbow
+(chromaHF)** and **73–82% of the dot-crawl (flicker)**. chromaHF /
+flicker columns are the residual; **(−N%)** is how much was removed vs.
+*degraded* (higher removed % is better). PSNR is dB vs. the clean source.
+
+| corpus | mode | PSNR Y / U / V | chromaHF | flicker |
+|---|---|---|---|---|
+| **VQEG** (held-out) | degraded | 30.7 / 32.9 / 35.1 | 419 | 1356 |
+| | **default** (3D hybrid) | 33.1 / 39.2 / 39.8 | **115 (−73%)** | **249 (−82%)** |
+| | comb 3D (`transform=0`) | 32.8 / 38.6 / 39.6 | 233 (−44%) | 354 (−74%) |
+| | transform 3D (`transform=1`) | 33.0 / 39.0 / 39.6 | 107 (−74%) | 261 (−81%) |
+| | 2D comb (`dimensions=2`) | 31.7 / 36.0 / 37.7 | 334 (−20%) | 860 (−37%) |
+| | *transparency* | 41.5 / 39.8 / 40.4 | 163 | 302 |
+| **BT.802 motion** (scenes 14+) | degraded | 30.2 / 32.0 / 34.3 | 581 | 1629 |
+| | **default** (3D hybrid) | 32.2 / 37.7 / 39.3 | **147 (−75%)** | **434 (−73%)** |
+| | transform 3D | 32.1 / 38.2 / 39.8 | 138 (−76%) | 402 (−75%) |
+| | comb 3D | 31.9 / 36.7 / 38.5 | 298 (−49%) | 548 (−66%) |
+| | 2D comb | 31.3 / 35.5 / 37.7 | 369 (−37%) | 1042 (−36%) |
+| | *transparency* | 40.8 / 38.6 / 40.4 | 213 | 520 |
+| **BT.802 stills** (scenes 1–13) | degraded | 28.5 / 30.2 / 32.2 | 606 | 1924 |
+| | **default** (3D hybrid) | 31.4 / 37.9 / 38.5 | 158 (−74%) | 136 (−93%) |
+| | comb 3D | 31.4 / 39.2 / 39.8 | 180 (−70%) | 17 (−99%) |
+| | 2D comb | 29.5 / 33.3 / 34.9 | 391 (−35%) | 1203 (−37%) |
+| | *transparency* | 40.8 / 40.0 / 40.7 | 212 | 170 |
+| **bars** (SMPTE EG-1) | degraded | 40.5 / 32.9 / 36.5 | 1186 | 110 |
+| | **default** (3D hybrid) | 40.7 / 36.5 / 37.8 | 218 (−82%) | 217 (—) |
+| | comb 3D | 42.6 / 37.9 / 39.5 | 218 (−82%) | 1 (—) |
+| | *transparency* | 44.0 / 41.0 / 41.8 | 223 | 225 |
+| **zone** (torture test) | degraded | 23.3 / 27.9 / 30.9 | 655 | 2377 |
+| | **default** (3D hybrid) | 26.2 / 87.8 / 94.2 | 0 (−100%) | 0 (−100%) |
+| | 2D comb | 24.9 / 34.3 / 37.2 | 432 (−34%) | 1265 (−47%) |
+| | *transparency* | 68.1 / 90.3 / 96.3 | 0 | 0 |
+
+On the **bars** rows the flicker column is round-trip residual, not real
+crawl (a static frame has no motion — its only frame-to-frame change is
+the subcarrier sequence), so no reduction % is meaningful there; read
+flicker on the motion corpora. The comb nulls that residual on a static
+input, which is why it reads near-zero on stills and bars — but that
+does not hold on real footage, where the hybrid wins.
+
+### PAL
+
+On held-out footage the defaults remove about **43% of the rainbow** and
+**26% of the dot-crawl**; `evidence=1.0` pushes both a little further.
+
+| corpus | mode | PSNR Y / U / V | chromaHF | flicker |
+|---|---|---|---|---|
+| **VQEG** (held-out) | degraded | 35.4 / 37.6 / 39.2 | 222 | 1366 |
+| | **default** (3D) | 35.8 / 38.2 / 38.0 | **127 (−43%)** | **1012 (−26%)** |
+| | default `+evidence=1.0` | 35.7 / 38.0 / 37.6 | 122 (−45%) | 971 (−29%) |
+| | trained 2D (`dimensions=2`) | 35.8 / 37.8 / 37.9 | 129 (−42%) | 1053 (−23%) |
+| | level 2D (`level=1`) | 35.6 / 38.2 / 38.2 | 146 (−34%) | 1105 (−19%) |
+| | threshold 2D (`threshold=0.4`) | 35.6 / 38.3 / 38.4 | 155 (−30%) | 1153 (−16%) |
+| | *transparency* | 41.1 / 38.6 / 38.5 | 149 | 1085 |
+| **bars** (EBU) | degraded | 46.8 / 36.8 / 39.1 | 430 | 191 |
+| | **default** (3D) | 48.0 / 37.4 / 39.9 | 210 (−51%) | 89 (−53%) |
+| | trained 2D | 49.3 / 37.5 / 39.9 | 212 (−51%) | 3 (−98%) |
+| | *transparency* | 52.8 / 44.5 / 48.9 | 229 | 90 |
+| **zone** (torture test) | degraded | 25.7 / 38.0 / 41.0 | 440 | 599 |
+| | **default** (3D) | 26.2 / 76.3 / 79.9 | 1 (−100%) | 4 (−99%) |
+| | trained 2D | 26.1 / 74.9 / 79.4 | 1 (−100%) | 6 (−99%) |
+| | *transparency* | 56.7 / 69.3 / 72.6 | 2 | 7 |
+
+Guidance:
+
+- **Just use the defaults** (`dimensions=3`, trained tables, NTSC
+  `transform=2`). They win or tie almost everywhere.
+- **`dimensions=2`** is the fast path — no neighboring frames, several
+  times less compute. Use it for stills, very short clips, or previews.
+- **NTSC `transform=`** picks how the 3D path separates: `0` a comb
+  (near-exact on fully static content), `1` a Transform separator
+  (stronger on motion), `2` (default) routes between them per sample.
+- **Artifact-heavy footage:** add `evidence=1.0` (PAL) to knock down
+  residual chroma flicker in flat regions.
+- **Graphics / titles / test patterns:** try `cti=1` (chroma transient
+  improvement) to re-sharpen color edges; leave it off on natural
+  footage, where it hurts.
+
+## Decode
+
+```python
+out = core.composite.Decode(comp, standard="ntsc", width=720)
+```
+
+Decodes an already-composite GRAY16 clip (the output of `Encode`) back
+to YUV444P16. `Restore` calls this internally; use it directly only if
+you are working with composite signals yourself. Composite input must be
+exactly `758×480`, `758×486` (NTSC) or `928×576` (PAL).
+
+Parameters (all optional, all also available on `Restore`):
+
+- `standard` — `"pal"` or `"ntsc"`. Required to match the encode.
+- `width` — output width, default `720`.
+- `dimensions` — `3` (default) spatio-temporal separation using
+  neighboring frames; `2` fast 2D (spatial / line comb); `1` a crude
+  notch reference (worst case).
+- `transform` — NTSC `dimensions=3` only: `0` comb, `1` Transform, `2`
+  motion-routed hybrid (default).
+- `eq` — chroma equalization. `2` (default on Transform paths) steers
+  chroma bandwidth by the separator's own confidence; `1` a fixed
+  inverse filter; `0` off.
+- `evidence` — PAL only, default `0`. A low-frequency luma prior that
+  attenuates chroma with no luma partner; `0.5–1` cuts flicker on
+  artifact-heavy footage.
+- `cti` — luma-guided chroma transient improvement, default off. For
+  graphics-like sources only.
+- `setup` — NTSC 7.5 IRE pedestal; must match the encode.
+
+Advanced separation controls (`threshold`, `thresholds`, `level`, `lut`)
+override the built-in trained tables; see the comments in
+`test/calibrate_thresholds.py`. `level=1` is the robust untrained
+alternative to the trained tables on synthetic extremes.
+
+## Encode
+
+```python
+comp = core.composite.Encode(clip, standard="ntsc")
+```
+
+The forward direction: YUV to a composite GRAY16 clip on the 4×fsc
+active raster (PAL 928×576, NTSC 758×480/486). Mostly useful for making
+test composites; `Restore` does the encode for you.
+
+- `standard` — `"pal"` or `"ntsc"`.
+- `setup` — NTSC only: add the 7.5 IRE pedestal (default off).
+- `precomb` — vertically low-pass U/V before modulation (Poynton's
+  precombing). Helpful only when feeding a comb decoder a *clean*
+  source; leave it off for cleanup, where it measurably hurts.
 
 ## Recipes
 
 ### Motion-compensated chroma cleanup
 
-The residual the spectral separators cannot touch — an
-amplitude-modulated pattern symmetric about the carrier *is* chroma —
-is phase-incoherent along motion trajectories: rainbows rotate in hue
-frame to frame while real chroma stays put. A motion-compensated
-chroma degrain after the decode cancels exactly that. With
+Some chroma residue is genuinely modulated color that no spectral
+separator can touch — but it is phase-incoherent along motion
+(rainbows rotate frame to frame while real color stays put). A
+motion-compensated chroma degrain *after* the decode cancels exactly
+that, with
 [vapoursynth-mvutensils](https://pypi.org/project/vapoursynth-mvutensils/):
 
 ```python
@@ -180,15 +310,10 @@ vec = core.mvu.AnalyseMany(sup, radius=2)
 out = core.mvu.Degrain(dec, sup, vec, planes=[1, 2], thsad=[400, 1600])
 ```
 
-Vectors come from the already-clean decoded luma; `planes=[1, 2]`
-touches chroma only; the SAD limit falls back to the unprocessed pixel
-where vectors fail. Measured on the reference clip this takes hot-spot
-flicker from −50% to −63% and chroma HF to −46%, with quiet and flat
-regions untouched — and on full-reference tests it *improves* moving
-chroma fidelity (V +0.8 dB), because trajectory averaging also cancels
-residual separation noise. Strength saturates around
-`thsad=[400, 1600]`, `radius=2`; the pre-decode placement is inferior
-(the round trip must see the artifacts untouched).
+Vectors come from the already-clean decoded luma; only chroma is
+touched; where vectors fail it falls back to the unprocessed pixel.
+Strength saturates around `thsad=[400, 1600]`, `radius=2`. Keep it after
+the decode — the round trip must see the artifacts untouched.
 
 ### Clean test composites
 
@@ -196,8 +321,18 @@ residual separation noise. Strength saturates around
 comp = core.composite.Encode(clip, standard="ntsc", precomb=1)
 ```
 
-`precomb=1` nulls line-alternating chroma exactly, the friendly choice
-when the consumer is a comb decoder. Keep it off for noise reduction.
+`precomb=1` nulls line-alternating chroma exactly — the friendly choice
+when the consumer is a comb decoder. Keep it off for cleanup.
+
+## Installing
+
+**VapourSynth:** drop `composite.so`/`composite.dll` in your plugins
+autoload dir (or `core.std.LoadPlugin(...)`).
+
+**AviSynth+:** load the same module. The AviSynth frontend registers
+`composite_Encode`, `composite_Decode`, `composite_Restore`, and needs
+**avsresize** (`z_ConvertFormat`) loaded at runtime for the internal
+resampling — install it alongside.
 
 ## Building
 
@@ -209,13 +344,28 @@ meson test -C build
 
 Requires Meson, a C99 compiler, FFTW3 (single precision), and
 VapourSynth (V4 API) with the Python module available for header
-discovery.
+discovery. The AviSynth+ frontend is built by default
+(`-Davisynth=true`); it shares the one module.
 
 End-to-end plugin tests:
 
 ```sh
 python test/test_composite.py build/composite.so
 ```
+
+## How it works
+
+Round-tripping Y'CbCr through a composite encode and a good decode
+removes cross-luma and cross-color artifacts baked in by a bad hardware
+decoder: the re-encode reconstructs the composite signal the bad decoder
+saw, and a Transform/comb decode re-separates it properly. The signal
+processing follows
+[ld-decode](https://github.com/happycube/ld-decode)'s ld-chroma-encoder
+and ld-chroma-decoder, after Clarke, *Colour encoding and decoding
+techniques for line-locked sampled PAL and NTSC television signals*,
+BBC RD 1986/2, with separation modes from GB 2365247 A (Easterbrook)
+and US 7,872,689 (Weston), and decoder adaptivity after Faroudja
+(*NTSC and Beyond*, 1988).
 
 ## License
 
