@@ -43,7 +43,7 @@ struct comp_avs_dec_t {
     int standard;
     int height;      /* raster height of the composite input */
     int in_frames;   /* source clip length, for edge clamping */
-    int want_mask;   /* emit the motion mask as the YUVA alpha plane */
+    int mask_kind;   /* COMP_MASK_* : emit that mask as the YUVA alpha (0 none) */
     AVS_Clip *anchor; /* Restore: the raster picture for refine, else NULL */
 };
 
@@ -141,12 +141,13 @@ static AVS_VideoFrame *AVSC_CC comp_avs_dec_get_frame(AVS_FilterInfo *fi, int n)
      * window. */
     AVS_VideoFrame *anchor = f->anchor ? avs_get_frame(f->anchor, n) : NULL;
 
-    /* mask="motion": dst is YUVA (see the create function); the motion
-     * mask goes into the alpha plane at the raster. Pre-zero so blanking/
-     * edge rows read still (0). The create function resamples it out. */
+    /* mask=: dst is YUVA (see the create function); the requested mask
+     * goes into the alpha plane at the raster. Pre-zero so blanking/edge
+     * rows read still / fully-confident (0). The create function
+     * resamples it out. */
     uint16_t *maskp = NULL;
     ptrdiff_t mask_stride = 0;
-    if (f->want_mask) {
+    if (f->mask_kind) {
         maskp = (uint16_t *)avs_get_write_ptr_p(dst, AVS_PLANAR_A);
         mask_stride = avs_get_pitch_p(dst, AVS_PLANAR_A) / 2;
         const int aw = avs_get_row_size_p(dst, AVS_PLANAR_A) / 2;
@@ -167,7 +168,7 @@ static AVS_VideoFrame *AVSC_CC comp_avs_dec_get_frame(AVS_FilterInfo *fi, int n)
                       avs_get_pitch_p(dst, AVS_PLANAR_U) / 2,
                       (uint16_t *)avs_get_write_ptr_p(dst, AVS_PLANAR_V),
                       avs_get_pitch_p(dst, AVS_PLANAR_V) / 2,
-                      &mt, maskp, mask_stride);
+                      &mt, maskp, mask_stride, f->mask_kind);
 
     /* each difficulty prop exists only where its path is active. The
      * resample and the Restore edge-splice drop these downstream; the
@@ -562,17 +563,25 @@ static AVS_Value AVSC_CC comp_avs_dec_create(AVS_ScriptEnvironment *env,
     if (eq == 2 && !has_transform)
         return avs_new_value_error("Decode: eq=2 needs a transform separation");
 
-    /* mask="motion": emit the motion mask as the alpha plane (index 13) */
-    int want_mask = 0;
+    /* mask=: emit the motion or confidence mask as the alpha (index 13) */
+    int mask_kind = COMP_MASK_NONE;
     if (avs_defined(avs_array_elt(args, 13))) {
         const char *mm = avs_as_string(avs_array_elt(args, 13));
-        if (!mm || strcmp(mm, "motion") != 0)
-            return avs_new_value_error("Decode: mask must be \"motion\"");
-        if (!(standard == COMP_STD_NTSC && dimensions == 3 && transform == 2))
-            return avs_new_value_error("Decode: mask=\"motion\" needs the ntsc "
-                                       "hybrid path (dimensions=3, transform=2)");
-        want_mask = 1;
+        if (mm && !strcmp(mm, "motion")) {
+            if (!(standard == COMP_STD_NTSC && dimensions == 3 && transform == 2))
+                return avs_new_value_error("Decode: mask=\"motion\" needs the ntsc "
+                                           "hybrid path (dimensions=3, transform=2)");
+            mask_kind = COMP_MASK_MOTION;
+        } else if (mm && !strcmp(mm, "confidence")) {
+            if (eq != 2)
+                return avs_new_value_error("Decode: mask=\"confidence\" needs eq=2 "
+                                           "(a transform separation)");
+            mask_kind = COMP_MASK_CONFIDENCE;
+        } else {
+            return avs_new_value_error("Decode: mask must be \"motion\" or \"confidence\"");
+        }
     }
+    const int want_mask = mask_kind != COMP_MASK_NONE;
 
     const int level_unset = !avs_defined(avs_array_elt(args, 9));
     const int level = comp_avs_opt_int(args, 9, 0);
@@ -657,7 +666,7 @@ static AVS_Value AVSC_CC comp_avs_dec_create(AVS_ScriptEnvironment *env,
     f->standard = standard;
     f->height = in_h;
     f->in_frames = in_frames;
-    f->want_mask = want_mask;
+    f->mask_kind = mask_kind;
     /* free_filter/user_data are not set on the filter yet, so on these
      * error paths releasing dec_clip frees only the empty filter shell;
      * f is freed here by hand */
@@ -913,17 +922,25 @@ static AVS_Value AVSC_CC comp_avs_res_create(AVS_ScriptEnvironment *env,
     if (eq == 2 && !has_transform)
         return avs_new_value_error("Restore: eq=2 needs a transform separation");
 
-    /* mask="motion": emit the motion mask as the alpha plane (index 15) */
-    int want_mask = 0;
+    /* mask=: emit the motion or confidence mask as the alpha (index 15) */
+    int mask_kind = COMP_MASK_NONE;
     if (avs_defined(avs_array_elt(args, 15))) {
         const char *mm = avs_as_string(avs_array_elt(args, 15));
-        if (!mm || strcmp(mm, "motion") != 0)
-            return avs_new_value_error("Restore: mask must be \"motion\"");
-        if (!(standard == COMP_STD_NTSC && dimensions == 3 && transform == 2))
-            return avs_new_value_error("Restore: mask=\"motion\" needs the ntsc "
-                                       "hybrid path (dimensions=3, transform=2)");
-        want_mask = 1;
+        if (mm && !strcmp(mm, "motion")) {
+            if (!(standard == COMP_STD_NTSC && dimensions == 3 && transform == 2))
+                return avs_new_value_error("Restore: mask=\"motion\" needs the ntsc "
+                                           "hybrid path (dimensions=3, transform=2)");
+            mask_kind = COMP_MASK_MOTION;
+        } else if (mm && !strcmp(mm, "confidence")) {
+            if (eq != 2)
+                return avs_new_value_error("Restore: mask=\"confidence\" needs eq=2 "
+                                           "(a transform separation)");
+            mask_kind = COMP_MASK_CONFIDENCE;
+        } else {
+            return avs_new_value_error("Restore: mask must be \"motion\" or \"confidence\"");
+        }
     }
+    const int want_mask = mask_kind != COMP_MASK_NONE;
 
     const int level_unset = !avs_defined(avs_array_elt(args, 11));
     const int level = comp_avs_opt_int(args, 11, 0);
@@ -1030,7 +1047,7 @@ static AVS_Value AVSC_CC comp_avs_res_create(AVS_ScriptEnvironment *env,
     df->standard = standard;
     df->height = in_h;
     df->in_frames = dfi->vi.num_frames;
-    df->want_mask = want_mask;
+    df->mask_kind = mask_kind;
     df->anchor = anchor; /* takes ownership of the second ref */
     if (comp_decode_init(&df->dec, standard, threshold,
                          comp_avs_num_threads(env), setup, dimensions, eq,

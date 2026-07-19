@@ -523,7 +523,7 @@ for out in (core.composite.Restore(bff9, standard='ntsc', mask='motion'),
     assert mask.format.id == vs.GRAY16
     assert (mask.width, mask.height) == (pic.width, pic.height)
     # the attached mask frame must not leak onto the picture output
-    assert 'CompositeMotionMask' not in pic.get_frame(4).props
+    assert 'CompositeMask' not in pic.get_frame(4).props
     # mask is a probability of 16-bit range; still content -> low (this
     # flat clip is fully static, so the router sends it all to the comb)
     mrow = mask.get_frame(4)[0]
@@ -593,5 +593,37 @@ for enc, std, h in ((enc9, 'ntsc', 480), (core.composite.Encode(
     for pl in range(3):
         a, b = ref[pl], rec[pl]
         assert bytes(a) == bytes(b), (std, 'recipe != Decode(720)', pl)
+
+# ---- mask="confidence": soft mask on any eq=2 path (PAL and NTSC), the
+# inverse of the confidence prop; a different gate from motion
+tex9 = core.std.StackHorizontal([flat([30000, 40960, 28672], w=360, length=9),
+                                 flat([30000, 24576, 36864], w=360, length=9)])
+for src, std in ((tex9, 'pal'),
+                 (core.std.SetFrameProps(core.std.StackHorizontal([
+                     flat([30000, 40960, 28672], w=360, h=480, length=9),
+                     flat([30000, 24576, 36864], w=360, h=480, length=9)]),
+                     _FieldBased=1), 'ntsc')):
+    out = core.composite.Restore(src, standard=std, mask='confidence')
+    assert isinstance(out, list) and len(out) == 2
+    pic, mask = out
+    assert mask.format.id == vs.GRAY16
+    assert (mask.width, mask.height) == (pic.width, pic.height)
+    assert 'CompositeMask' not in pic.get_frame(0).props
+    mp = np.asarray(mask.get_frame(0)[0]).astype(np.float64)
+    assert mp.min() >= 0 and mp.max() <= 65535
+    # the mask is 1 - conf, so its mean tracks 1 - the confidence prop
+    conf = pic.get_frame(0).props['CompositeSeparationConfidenceMean']
+    assert abs(mp.mean() / 65535.0 - (1 - conf)) < 0.02, (std, mp.mean() / 65535.0, conf)
+
+# confidence needs eq=2 (a wider gate than motion — it works on PAL and on
+# non-hybrid NTSC, but errors at eq=1)
+for src, std in ((flat([30000, 40960, 28672]), 'pal'), (bff9, 'ntsc')):
+    try:
+        core.composite.Restore(src, standard=std, eq=1, dimensions=2,
+                               mask='confidence')
+    except vs.Error as e:
+        assert 'eq=2' in str(e), (std, str(e))
+    else:
+        assert False, 'expected confidence eq=2 error'
 
 print('test_composite: all tests passed')

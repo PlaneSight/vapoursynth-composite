@@ -138,11 +138,16 @@ struct comp_frame_view_t {
 /* Per-frame accumulation of the eq=2 separation-confidence map, summed
  * over exactly the samples the confidence blend consumes (immune to the
  * stale/partial-fill hazard of the reused conf scratch). Reduced to the
- * mean and population std-dev reported as frame props. */
+ * mean and population std-dev reported as frame props. When out_mask is
+ * non-NULL the same consumption loop also writes the confidence mask
+ * (65535*(1-conf)) there, at the output row it is already producing — so
+ * the mask inherits conf's correct per-pixel layout for free. */
 typedef struct comp_conf_acc_t {
     double sum;
     double sumsq;
     uint64_t n;
+    uint16_t *out_mask;     /* confidence mask base (frame 0,0), or NULL */
+    ptrdiff_t mask_stride;
 } comp_conf_acc_t;
 
 /* Per-frame difficulty/effort metrics reported as optional frame props.
@@ -248,11 +253,16 @@ int comp_decode_look(const comp_decode_t *d);
  * each field is written only when its path is active (see
  * comp_decode_metrics_t), so the caller must init it to
  * COMP_METRICS_INIT and emit a prop only for fields that changed.
- * out_mask, when non-NULL, receives the per-sample motion-router mask
- * (GRAY16: 65535 = motion/transform-routed, 0 = still/comb), one frame at
- * mask_stride, indexed by the same 0-based active rows as dsty (rows
- * beyond `rows` are untouched, so the caller pre-zeros the plane). It is
- * written only on the NTSC hybrid path (dimensions=3, transform=2). */
+ * out_mask, when non-NULL, receives a per-sample GRAY16 mask selected by
+ * mask_kind, one frame at mask_stride, indexed by the same 0-based active
+ * rows as dsty (rows beyond `rows` are untouched, so the caller pre-zeros
+ * the plane):
+ *  - COMP_MASK_MOTION: the NTSC hybrid motion router (65535 = motion /
+ *    transform-routed, 0 = still / comb); NTSC dimensions=3 transform=2.
+ *  - COMP_MASK_CONFIDENCE: 65535*(1 - conf), i.e. least-confident white,
+ *    the inverse of the eq=2 separation-confidence map; any eq=2 path. */
+enum { COMP_MASK_NONE = 0, COMP_MASK_MOTION, COMP_MASK_CONFIDENCE };
+
 void comp_decode_frame(comp_decode_t *d, int frame, int nframes,
                        int rows, int row_off,
                        const comp_frame_view_t *views, const int *view_frames,
@@ -262,6 +272,6 @@ void comp_decode_frame(comp_decode_t *d, int frame, int nframes,
                        uint16_t *dstu, ptrdiff_t ustride,
                        uint16_t *dstv, ptrdiff_t vstride,
                        comp_decode_metrics_t *metrics,
-                       uint16_t *out_mask, ptrdiff_t mask_stride);
+                       uint16_t *out_mask, ptrdiff_t mask_stride, int mask_kind);
 
 #endif

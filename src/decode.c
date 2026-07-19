@@ -677,9 +677,15 @@ static void pal_decode_field(const comp_decode_t *d, int frame, int field,
                         + (int32_t)(((int64_t)wq * (v_eq[x] - v_nar[x])) >> 15);
                 }
                 if (acc) {
+                    uint16_t *om = acc->out_mask
+                        ? acc->out_mask + row * acc->mask_stride : NULL;
                     for (int x = 0; x < w; x++) {
                         acc->sum += cw[x];
                         acc->sumsq += (double)cw[x] * cw[x];
+                        if (om) {
+                            float c = cw[x] < 0.0f ? 0.0f : cw[x] > 1.0f ? 1.0f : cw[x];
+                            om[x] = (uint16_t)lrintf((1.0f - c) * 65535.0f);
+                        }
                     }
                     acc->n += w;
                 }
@@ -1068,6 +1074,7 @@ static void ntsc_split3d(const comp_decode_t *d, int rows, int row_off,
  * luma as composite minus the resynthesized filtered chroma. conf
  * (may be NULL) is the transform's confidence row for the eq=2 blend. */
 static void ntsc_demod_line(const comp_decode_t *d, int frame, int raster_row,
+                            int out_row,
                             const uint16_t *comp_row, const int16_t *chroma_row,
                             const float *conf, comp_conf_acc_t *acc,
                             const uint8_t *mask,
@@ -1146,9 +1153,15 @@ static void ntsc_demod_line(const comp_decode_t *d, int frame, int raster_row,
             narrow_row(d, u_row, u_nar, w);
             narrow_row(d, v_row, v_nar, w);
             if (acc) {
+                uint16_t *om = acc->out_mask
+                    ? acc->out_mask + out_row * acc->mask_stride : NULL;
                 for (int x = 0; x < w; x++) {
                     acc->sum += conf[x];
                     acc->sumsq += (double)conf[x] * conf[x];
+                    if (om) {
+                        float c = conf[x] < 0.0f ? 0.0f : conf[x] > 1.0f ? 1.0f : conf[x];
+                        om[x] = (uint16_t)lrintf((1.0f - c) * 65535.0f);
+                    }
                 }
                 acc->n += w;
             }
@@ -1360,15 +1373,23 @@ void comp_decode_frame(comp_decode_t *d, int frame, int nframes,
                        uint16_t *dstu, ptrdiff_t ustride,
                        uint16_t *dstv, ptrdiff_t vstride,
                        comp_decode_metrics_t *metrics,
-                       uint16_t *out_mask, ptrdiff_t mask_stride)
+                       uint16_t *out_mask, ptrdiff_t mask_stride, int mask_kind)
 {
     comp_decode_scratch_t *s = scratch_acquire(d);
     const int w = d->width;
     const uint16_t *comp = views[look].data;
     const ptrdiff_t comp_stride = views[look].stride;
-    comp_conf_acc_t acc = { 0.0, 0.0, 0 };
-    /* the confidence map exists only at eq=2; accumulate only then */
-    comp_conf_acc_t *pacc = (metrics && d->eq == 2 && s->conf) ? &acc : NULL;
+    comp_conf_acc_t acc = { 0.0, 0.0, 0, NULL, 0 };
+    /* the confidence map exists only at eq=2. Run the accumulator when the
+     * caller wants the props (metrics) or the confidence mask; the same
+     * consumption loop writes 65535*(1-conf) into out_mask when set. */
+    const int want_conf_mask = out_mask && mask_kind == COMP_MASK_CONFIDENCE;
+    comp_conf_acc_t *pacc = ((metrics || want_conf_mask) && d->eq == 2 && s->conf)
+                            ? &acc : NULL;
+    if (want_conf_mask && pacc) {
+        acc.out_mask = out_mask;
+        acc.mask_stride = mask_stride;
+    }
 
     if (d->dimensions == 1) {
         crude_decode_frame(d, frame, rows, row_off, 1, comp, comp_stride,
@@ -1509,7 +1530,7 @@ void comp_decode_frame(comp_decode_t *d, int frame, int nframes,
                          s->chroma);
         }
         for (int r = 0; r < rows; r++)
-            ntsc_demod_line(d, frame, r + row_off,
+            ntsc_demod_line(d, frame, r + row_off, r,
                             comp + r * comp_stride, s->chroma + r * w,
                             s->conf ? s->conf + r * w : NULL, pacc,
                             d->use_transform == 2 ? s->mask + r * w : NULL,
@@ -1523,7 +1544,7 @@ void comp_decode_frame(comp_decode_t *d, int frame, int nframes,
                     metrics ? &metrics->refine_residual : NULL,
                     metrics ? &metrics->refine_correction : NULL);
 
-    if (pacc && acc.n) {
+    if (pacc && acc.n && metrics) {     /* pacc can run for the mask alone */
         const double mean = acc.sum / (double)acc.n;
         double var = acc.sumsq / (double)acc.n - mean * mean;
         if (var < 0.0)                  /* guard fp cancellation near zero */
@@ -1537,12 +1558,13 @@ void comp_decode_frame(comp_decode_t *d, int frame, int nframes,
      * Report the motion fraction, and emit the per-sample motion mask
      * (GRAY16, 65535 = motion) at the raster when a mask output is asked
      * for — matching CompositeMotionFraction's white=motion polarity. */
-    if ((metrics || out_mask) && d->standard == COMP_STD_NTSC && d->dimensions == 3
-        && d->use_transform == 2 && s->mask) {
+    const int want_motion_mask = out_mask && mask_kind == COMP_MASK_MOTION;
+    if ((metrics || want_motion_mask) && d->standard == COMP_STD_NTSC
+        && d->dimensions == 3 && d->use_transform == 2 && s->mask) {
         uint64_t motion = 0;
         for (int r = 0; r < rows; r++) {
             const uint8_t *mk = s->mask + r * w;
-            uint16_t *om = out_mask ? out_mask + r * mask_stride : NULL;
+            uint16_t *om = want_motion_mask ? out_mask + r * mask_stride : NULL;
             for (int x = 0; x < w; x++) {
                 const int is_motion = mk[x] == 0;
                 motion += is_motion;

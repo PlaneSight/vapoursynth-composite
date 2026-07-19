@@ -85,7 +85,7 @@ static void test_ntsc_roundtrip(int setup, int rows, int row_off)
             const comp_frame_view_t v = { ncomp[0], w };
             const int vf = frame;
             comp_decode_frame(&dec, frame, 2, rows, row_off, &v, &vf, 0, NULL, 0,
-                              nouty[0], w, noutu[0], w, noutv[0], w, NULL, NULL, 0);
+                              nouty[0], w, noutu[0], w, noutv[0], w, NULL, NULL, 0, 0);
         }
 
         for (int r = 12; r < rows - 12; r++) {
@@ -172,7 +172,7 @@ static void test_3d_roundtrip(int standard, int use_transform, int level)
         comp_decode_frame(&dec, frame, nframes, rows, 0, views, view_frames, look, NULL, 0,
                           outy[0], COMP_ACTIVE_WIDTH_PAL,
                           outu[0], COMP_ACTIVE_WIDTH_PAL,
-                          outv[0], COMP_ACTIVE_WIDTH_PAL, NULL, NULL, 0);
+                          outv[0], COMP_ACTIVE_WIDTH_PAL, NULL, NULL, 0, 0);
 
         for (int r = 32; r < rows - 32; r++) {
             if (r >= rows / 2 - 40 && r < rows / 2 + 40)
@@ -253,7 +253,7 @@ static void test_eq(void)
     comp_decode_t *decs[3] = { &dec0, &dec1, &dec2 };
     for (int e = 0; e < 3; e++) {
         comp_decode_frame(decs[e], 0, 1, H, 0, &v, &vf, 0, NULL, 0,
-                          outy[0], w, outu[0], w, outv[0], w, NULL, NULL, 0);
+                          outy[0], w, outu[0], w, outv[0], w, NULL, NULL, 0, 0);
         double sum = 0.0;
         for (int r = 32; r < H - 32; r++)
             for (int x = 48; x < w - 48; x++) {
@@ -283,7 +283,7 @@ static void test_eq(void)
     double leak[3];
     for (int e = 0; e < 3; e++) {
         comp_decode_frame(decs[e], 0, 1, H, 0, &v, &vf, 0, NULL, 0,
-                          outy[0], w, outu[0], w, outv[0], w, NULL, NULL, 0);
+                          outy[0], w, outu[0], w, outv[0], w, NULL, NULL, 0, 0);
         double sum = 0.0;
         for (int r = 32; r < H - 32; r++)
             for (int x = 48; x < w - 48; x++) {
@@ -312,7 +312,7 @@ static void test_eq(void)
         comp_encode_line(&enc, comp[r], srcy[r], srcu[r], srcv[r],
                          comp_sc_line(COMP_STD_PAL, 0, r));
     comp_decode_frame(&dec1, 0, 1, H, 0, &v, &vf, 0, NULL, 0,
-                      outy[0], w, outu[0], w, outv[0], w, NULL, NULL, 0);
+                      outy[0], w, outu[0], w, outv[0], w, NULL, NULL, 0, 0);
     for (int r = 32; r < H - 32; r += 61)
         for (int x = 48; x < w - 48; x += 13) {
             CHECK(abs((int)outu[r][x] - 40960) <= 64, "eq flat U %d at %d,%d", outu[r][x], r, x);
@@ -355,15 +355,15 @@ static void test_refine(void)
 
     /* degrade through the crude decoder, then re-encode as NR input */
     comp_decode_frame(&crude, 0, 1, H, 0, &v0, &vf, 0, NULL, 0,
-                      ydeg[0][0], W, ydeg[1][0], W, ydeg[2][0], W, NULL, NULL, 0);
+                      ydeg[0][0], W, ydeg[1][0], W, ydeg[2][0], W, NULL, NULL, 0, 0);
     for (int r = 0; r < H; r++)
         comp_encode_line(&enc, comp1[r], ydeg[0][r], ydeg[1][r], ydeg[2][r],
                          comp_sc_line(COMP_STD_PAL, 0, r));
 
     comp_decode_frame(&dec0, 0, 1, H, 0, &v1, &vf, 0, NULL, 0,
-                      out0[0][0], W, out0[1][0], W, out0[2][0], W, NULL, NULL, 0);
+                      out0[0][0], W, out0[1][0], W, out0[2][0], W, NULL, NULL, 0, 0);
     comp_decode_frame(&dec2, 0, 1, H, 0, &v1, &vf, 0, ydeg[0][0], W,
-                      out2[0][0], W, out2[1][0], W, out2[2][0], W, NULL, NULL, 0);
+                      out2[0][0], W, out2[1][0], W, out2[2][0], W, NULL, NULL, 0, 0);
 
     double e0 = 0.0, e2 = 0.0, c0 = 0.0, c2 = 0.0;
     for (int r = 32; r < H - 32; r++)
@@ -420,7 +420,7 @@ static void test_pal2d_roundtrip(int level)
             const comp_frame_view_t v = { comp[0], W };
             const int vf = frame;
             comp_decode_frame(&dec, frame, 4, H, 0, &v, &vf, 0, NULL, 0,
-                              outy[0], W, outu[0], W, outv[0], W, NULL, NULL, 0);
+                              outy[0], W, outu[0], W, outv[0], W, NULL, NULL, 0, 0);
         }
 
         /* measure away from transitions: the chroma low-passes smear
@@ -486,9 +486,9 @@ static void test_lut(void)
     const comp_frame_view_t v = { comp[0], W };
     const int vf = 0;
     comp_decode_frame(&dec_th, 0, 1, H, 0, &v, &vf, 0, NULL, 0,
-                      outy[0], W, outu[0], W, outv[0], W, NULL, NULL, 0);
+                      outy[0], W, outu[0], W, outv[0], W, NULL, NULL, 0, 0);
     comp_decode_frame(&dec_lut, 0, 1, H, 0, &v, &vf, 0, NULL, 0,
-                      outy2[0], W, outu2[0], W, outv2[0], W, NULL, NULL, 0);
+                      outy2[0], W, outu2[0], W, outv2[0], W, NULL, NULL, 0, 0);
 
     CHECK(!memcmp(outy, outy2, sizeof(outy)) && !memcmp(outu, outu2, sizeof(outu))
           && !memcmp(outv, outv2, sizeof(outv)),

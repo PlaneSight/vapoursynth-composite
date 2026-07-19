@@ -280,34 +280,36 @@ Parameters (all optional, all also available on `Restore`):
 - `cti` — luma-guided chroma transient improvement, default off. For
   graphics-like sources only.
 - `setup` — NTSC 7.5 IRE pedestal; must match the encode.
-- `mask` — set to `"motion"` to also output the motion-router mask (see
-  *Motion mask* below). NTSC hybrid path only.
+- `mask` — output a per-sample mask as a second clip: `"motion"` (the
+  NTSC hybrid router) or `"confidence"` (the separation confidence). See
+  *Masks* below.
 
 Advanced separation controls (`threshold`, `thresholds`, `level`, `lut`)
 override the built-in trained tables; see the comments in
 `test/calibrate_thresholds.py`. `level=1` is the robust untrained
 alternative to the trained tables on synthetic extremes.
 
-## Motion mask
+## Masks
 
-On the NTSC hybrid path (the default: `dimensions=3`, `transform=2`) the
-decoder routes each sample to either the comb (still regions) or the
-Transform separator (motion). Passing `mask="motion"` exposes that
-per-pixel decision as a second output clip, so you can postprocess the
-moving regions differently — for example, a stronger chroma cleanup only
-where rainbows can still occur. The mask is white (max) where the sample
-was treated as motion and black where it was still, matching the
-convention of the mvtools/mvutensils motion masks.
+`Decode` and `Restore` can output a per-sample mask as a second clip
+alongside the picture, so you can postprocess selected regions
+differently — the region a sample fell into, or how well it separated.
+Two kinds are available via `mask=`.
 
-`mask="motion"` only works on the NTSC hybrid path (it errors elsewhere,
-since no other path has a motion router).
+The mask comes from the same decode as the picture (no second pass) and
+is resampled to the output `width` with bilinear — a clean soft edge,
+unlike the picture's sharper filter. For a crisp, un-resampled mask use
+`width=0` (see `width` above); the mask then comes straight off the
+decode raster.
+
+How the two outputs are returned differs by host:
 
 **VapourSynth** returns a two-element list, `[picture, mask]`:
 
 ```python
 pic, mask = core.composite.Restore(clip, standard="ntsc", mask="motion")
 alt = pic.some.AggressiveChromaCleanup()
-out = core.std.MaskedMerge(pic, alt, mask, planes=[1, 2])  # moving areas only
+out = core.std.MaskedMerge(pic, alt, mask, planes=[1, 2])
 ```
 
 **AviSynth+** returns one `YUVA` clip with the mask as its alpha; pull it
@@ -320,10 +322,27 @@ alt  = AggressiveChromaCleanup(dec)
 Overlay(dec, alt, mask=mask)
 ```
 
-The mask is resampled to the output `width` with bilinear (a clean soft
-edge, unlike the picture's sharper filter). For a crisp, un-resampled
-mask, use `width=0` (see `width` above) — the mask then comes straight
-off the decode raster as a hard 0/max mask.
+### `mask="motion"`
+
+On the NTSC hybrid path (the default: `dimensions=3`, `transform=2`) the
+decoder routes each sample to the comb (still regions) or the Transform
+separator (motion). `mask="motion"` exposes that per-pixel decision:
+**white = motion**, black = still — matching the mvtools/mvutensils
+convention, so `MaskedMerge` processes the moving regions. It works only
+on the NTSC hybrid path (it errors elsewhere, since no other path has a
+motion router).
+
+### `mask="confidence"`
+
+`mask="confidence"` exposes the separator's per-sample confidence — the
+same signal behind the `CompositeSeparationConfidence*` properties —
+available on **any `eq=2` path** (all Transform separations, PAL and
+NTSC; it errors when `eq` is not 2). Unlike the binary motion mask it is
+**soft** (a graded 0–max mask). Polarity is **white = least confident**,
+i.e. the *inverse* of the confidence property (a `PlaneStats` mean of the
+mask is ≈ `1 − CompositeSeparationConfidenceMean`): white marks the
+samples where chroma separation was most suspect — the ones you would
+clean hardest.
 
 ## Working at the 4fsc raster (`width=0`)
 
