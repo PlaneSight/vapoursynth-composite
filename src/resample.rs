@@ -15,8 +15,14 @@ pub(crate) struct ResampleGeometry {
 
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub(crate) enum ResampleError {
-    InvalidDimensions { input_width: usize, output_width: usize },
-    InvalidGeometry { src_left: f64, src_width: f64 },
+    InvalidDimensions {
+        input_width: usize,
+        output_width: usize,
+    },
+    InvalidGeometry {
+        src_left: f64,
+        src_width: f64,
+    },
 }
 
 impl fmt::Display for ResampleError {
@@ -114,10 +120,8 @@ impl HorizontalBilinearResampler {
         assert_eq!(input.len(), self.input_width);
         assert_eq!(output.len(), self.output_width);
         for (destination, &(left, right, fraction)) in output.iter_mut().zip(&*self.samples) {
-            let value = f32::from(input[left]).mul_add(
-                1.0 - fraction,
-                f32::from(input[right]) * fraction,
-            );
+            let value =
+                f32::from(input[left]).mul_add(1.0 - fraction, f32::from(input[right]) * fraction);
             *destination = value.round().clamp(0.0, f32::from(u16::MAX)) as u16;
         }
     }
@@ -255,7 +259,8 @@ pub(crate) fn decode_edge_columns(
         left += 1;
     }
     while right < output_width
-        && geometry.src_left + (output_width as f64 - right as f64 - 0.5) * step > raster_width - 0.5
+        && geometry.src_left + (output_width as f64 - right as f64 - 0.5) * step
+            > raster_width - 0.5
     {
         right += 1;
     }

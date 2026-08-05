@@ -27,7 +27,10 @@ use self::resample::{
 use crate::decode::{
     DecodeReport, DecodeScratch, DecoderOptions, EqualizerMode, MaskKind, NtscTemporalMode,
 };
-use crate::{DecodeMode, Decoder, Encoder, FrameIndex, GraySink, GraySource, Setup, Standard, YuvSink, YuvSource};
+use crate::{
+    DecodeMode, Decoder, Encoder, FrameIndex, GraySink, GraySource, Setup, Standard, YuvSink,
+    YuvSource,
+};
 
 const PLUGIN_ID: &str = "com.planesight.composite";
 const MAX_TEMPORAL_WINDOW: usize = 9;
@@ -56,17 +59,17 @@ fn constant_resolution(node: &Node<'_>) -> anyhow::Result<Resolution> {
 fn validate_yuv_input(node: &Node<'_>, standard: Standard) -> anyhow::Result<InputContract> {
     let info = node.info();
     let resolution = constant_resolution(node)?;
-    ensure!(info.format.color_family() == ColorFamily::YUV, "clip must be YUV");
+    ensure!(
+        info.format.color_family() == ColorFamily::YUV,
+        "clip must be YUV"
+    );
     standard
         .raster()
         .row_offset(standard, resolution.height, false)?;
     Ok(InputContract { resolution })
 }
 
-fn validate_yuv444p16_raster(
-    node: &Node<'_>,
-    standard: Standard,
-) -> anyhow::Result<InputContract> {
+fn validate_yuv444p16_raster(node: &Node<'_>, standard: Standard) -> anyhow::Result<InputContract> {
     let info = node.info();
     let contract = validate_yuv_input(node, standard)?;
     ensure!(
@@ -154,11 +157,13 @@ fn parse_decoder_options(
     mask: Option<&[u8]>,
 ) -> anyhow::Result<(Decoder, Option<MaskKind>)> {
     let mode = DecodeMode::from_dimensions(dimensions.unwrap_or(3))?;
-    let transform = transform.unwrap_or(if standard == Standard::Ntsc && mode == DecodeMode::TemporalTransform {
-        2
-    } else {
-        0
-    });
+    let transform = transform.unwrap_or(
+        if standard == Standard::Ntsc && mode == DecodeMode::TemporalTransform {
+            2
+        } else {
+            0
+        },
+    );
     ensure!(
         (0..=2).contains(&transform),
         "transform must be 0 (comb), 1 (transform), or 2 (hybrid)"
@@ -192,7 +197,10 @@ fn parse_decoder_options(
         "eq=2 needs a transform separation"
     );
     let cti = cti.unwrap_or(0) != 0;
-    ensure!(!cti || mode != DecodeMode::Notch, "cti needs dimensions 2 or 3");
+    ensure!(
+        !cti || mode != DecodeMode::Notch,
+        "cti needs dimensions 2 or 3"
+    );
     let amplitude_limit = level.unwrap_or(0) != 0;
     ensure!(
         !amplitude_limit || has_transform,
@@ -265,7 +273,11 @@ fn row_offset(standard: Standard, frame: &FrameRef<'_>) -> anyhow::Result<usize>
         .row_offset(standard, frame.height(0), top_field_first)?)
 }
 
-fn make_output_geometry(standard: Standard, width: usize, height: usize) -> anyhow::Result<OutputGeometry> {
+fn make_output_geometry(
+    standard: Standard,
+    width: usize,
+    height: usize,
+) -> anyhow::Result<OutputGeometry> {
     if width == 0 {
         return Ok(OutputGeometry {
             resolution: Resolution {
@@ -593,7 +605,8 @@ fn window_frame_index(n: usize, look: usize, slot: usize, frame_count: usize) ->
     if slot < look {
         n.checked_sub(look - slot)
     } else {
-        n.checked_add(slot - look).filter(|&index| index < frame_count)
+        n.checked_add(slot - look)
+            .filter(|&index| index < frame_count)
     }
 }
 
@@ -626,13 +639,12 @@ fn fetch_window<'core>(
     frame_count: usize,
 ) -> anyhow::Result<[Option<FrameRef<'core>>; MAX_TEMPORAL_WINDOW]> {
     let count = look * 2 + 1;
-    let mut frames: [Option<FrameRef<'core>>; MAX_TEMPORAL_WINDOW] =
-        std::array::from_fn(|_| None);
-    for slot in 0..count {
+    let mut frames: [Option<FrameRef<'core>>; MAX_TEMPORAL_WINDOW] = std::array::from_fn(|_| None);
+    for (slot, frame) in frames.iter_mut().enumerate().take(count) {
         let Some(index) = window_frame_index(n, look, slot, frame_count) else {
             continue;
         };
-        frames[slot] = Some(
+        *frame = Some(
             source
                 .get_frame_filter(context, index)
                 .ok_or_else(|| anyhow!("source frame {index} was not returned"))?,
@@ -703,7 +715,13 @@ fn decode_requested_window<'core>(
                 window[slot] = source;
             }
         }
-        decoder.decode_window_with_scratch(offset, &window[..count], &indices[..count], output, scratch)?
+        decoder.decode_window_with_scratch(
+            offset,
+            &window[..count],
+            &indices[..count],
+            output,
+            scratch,
+        )?
     };
     let current = frames[look]
         .take()
@@ -911,7 +929,10 @@ fn refine_luma(
         .map(|(&decoded, &initial)| i64::from((i32::from(decoded) - i32::from(initial)).abs()))
         .sum::<i64>();
     let samples = (width * height) as f64;
-    Ok((residual_sum as f64 / samples, correction_sum as f64 / samples))
+    Ok((
+        residual_sum as f64 / samples,
+        correction_sum as f64 / samples,
+    ))
 }
 
 struct RestoreFilter<'core> {
@@ -1076,6 +1097,9 @@ make_filter_function! {
     }
 }
 
+// Decode deliberately mirrors the public VapourSynth contract, whose distinct
+// named arguments exceed Clippy's generic function-parameter heuristic.
+#[allow(clippy::too_many_arguments)]
 make_filter_function! {
     DecodeFunction, "Decode"
     fn create_decode<'core>(
@@ -1139,6 +1163,9 @@ make_filter_function! {
     }
 }
 
+// Restore deliberately mirrors the public VapourSynth contract, whose distinct
+// named arguments exceed Clippy's generic function-parameter heuristic.
+#[allow(clippy::too_many_arguments)]
 make_filter_function! {
     RestoreFunction, "Restore"
     fn create_restore<'core>(
