@@ -151,7 +151,7 @@ impl Transform2d {
         &self,
         input: &dyn GraySource,
         chroma: &mut [f32],
-        mut confidence: Option<&mut [f32]>,
+        confidence: Option<&mut [f32]>,
         scratch: &mut TransformScratch,
     ) {
         let (width, height) = input.dimensions();
@@ -298,7 +298,7 @@ impl Transform2d {
         height: usize,
         tile: &[Complex32],
         output: &mut [f32],
-        mut confidence: Option<&mut [f32]>,
+        confidence: Option<&mut [f32]>,
         tile_confidence: f32,
     ) {
         let normalization = (PAL_2D_WIDTH * PAL_2D_HEIGHT) as f32;
