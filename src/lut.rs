@@ -3,6 +3,8 @@
 //! The values are generated at build time from the preserved calibration
 //! source. They are never linked into the Rust plugin as C code.
 
+#![allow(clippy::approx_constant)]
+
 use std::sync::Arc;
 
 include!(concat!(env!("OUT_DIR"), "/builtin_lut.rs"));

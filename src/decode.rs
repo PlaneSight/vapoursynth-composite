@@ -787,15 +787,15 @@ fn builtin_lut(
 }
 
 fn uses_transform(standard: Standard, mode: DecodeMode, ntsc_mode: NtscTemporalMode) -> bool {
-    match (standard, mode, ntsc_mode) {
-        (Standard::Pal, DecodeMode::SpatialComb | DecodeMode::TemporalTransform, _) => true,
-        (
-            Standard::Ntsc,
-            DecodeMode::TemporalTransform,
-            NtscTemporalMode::Transform | NtscTemporalMode::Hybrid,
-        ) => true,
-        _ => false,
-    }
+    matches!(
+        (standard, mode, ntsc_mode),
+        (Standard::Pal, DecodeMode::SpatialComb | DecodeMode::TemporalTransform, _)
+            | (
+                Standard::Ntsc,
+                DecodeMode::TemporalTransform,
+                NtscTemporalMode::Transform | NtscTemporalMode::Hybrid,
+            )
+    )
 }
 
 fn lut_length(standard: Standard, mode: DecodeMode, ntsc_mode: NtscTemporalMode) -> usize {
