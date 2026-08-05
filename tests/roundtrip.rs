@@ -1,3 +1,5 @@
+//! End-to-end encode/decode tests.
+
 use vapoursynth_composite::{
     DecodeMode, Decoder, Encoder, FrameIndex, Plane, PlaneMut, Setup, Standard,
 };
