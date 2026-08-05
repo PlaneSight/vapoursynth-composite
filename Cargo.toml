@@ -1,0 +1,36 @@
+[package]
+name = "vapoursynth-composite"
+version = "0.2.0"
+edition = "2024"
+rust-version = "1.88"
+description = "PAL and NTSC composite-video restoration for VapourSynth"
+license = "GPL-3.0-or-later"
+repository = "https://github.com/PlaneSight/vapoursynth-composite"
+publish = false
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+anyhow = "1.0.98"
+vapoursynth = { version = "=0.5.6", default-features = false }
+
+[dev-dependencies]
+proptest = "1.7.0"
+
+[profile.release]
+codegen-units = 1
+lto = "thin"
+panic = "abort"
+
+[lints.rust]
+unsafe_code = "deny"
+missing_docs = "warn"
+
+[lints.clippy]
+all = { level = "warn", priority = -1 }
+correctness = "deny"
+perf = "deny"
+suspicious = "deny"
+unwrap_used = "deny"
+expect_used = "deny"
