@@ -12,7 +12,10 @@ mod model;
 mod plugin;
 mod subcarrier;
 
-pub use decode::{DecodeConfigError, DecodeError, DecodeMode, Decoder};
+pub use decode::{
+    DecodeConfigError, DecodeError, DecodeMode, DecodeReport, DecodeScratch, Decoder,
+    DecoderOptions, EqualizerMode, MaskKind, NtscTemporalMode,
+};
 pub use encode::{EncodeError, Encoder};
 pub use model::{
     FrameIndex, GeometryError, GraySink, GraySource, ParseStandardError, Plane, PlaneError,

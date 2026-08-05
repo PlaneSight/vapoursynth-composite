@@ -495,9 +495,10 @@ impl Decoder {
     /// Returns how many clamped source frames are required on either side.
     #[must_use]
     pub const fn look(&self) -> usize {
-        match self.mode {
-            DecodeMode::TemporalTransform => 4,
-            DecodeMode::Notch | DecodeMode::SpatialComb => 0,
+        match (self.standard, self.mode, self.ntsc_temporal) {
+            (Standard::Ntsc, DecodeMode::TemporalTransform, NtscTemporalMode::Comb) => 1,
+            (_, DecodeMode::TemporalTransform, _) => 4,
+            (_, DecodeMode::Notch | DecodeMode::SpatialComb, _) => 0,
         }
     }
 
@@ -691,8 +692,9 @@ impl Decoder {
     }
 
     fn separate_temporal(&self, frames: &[&dyn GraySource], scratch: &mut DecodeScratch) {
+        let center = self.look();
         match self.ntsc_temporal {
-            NtscTemporalMode::Comb => self.separate_spatial(frames[4], &mut scratch.chroma),
+            NtscTemporalMode::Comb => self.separate_spatial(frames[center], &mut scratch.chroma),
             NtscTemporalMode::Transform | NtscTemporalMode::Hybrid => {
                 let transform = match self.transform_3d.as_ref() {
                     Some(transform) => transform,
@@ -713,8 +715,13 @@ impl Decoder {
                 quantize_chroma(&scratch.separated, &mut scratch.chroma);
                 if self.standard == Standard::Ntsc && self.ntsc_temporal == NtscTemporalMode::Hybrid
                 {
-                    self.separate_spatial(frames[4], &mut scratch.comb);
-                    self.apply_hybrid_motion(frames[3], frames[4], frames[5], scratch);
+                    self.separate_spatial(frames[center], &mut scratch.comb);
+                    self.apply_hybrid_motion(
+                        frames[center - 1],
+                        frames[center],
+                        frames[center + 1],
+                        scratch,
+                    );
                 }
             }
         }
@@ -933,9 +940,7 @@ fn design_equalizer(standard: Standard) -> [i32; EQUALIZER_TAPS] {
                     .cos();
         }
         sum += gains[SPECTRUM_SAMPLES / 2] * (std::f64::consts::PI * offset).cos();
-        let hanning = 0.5
-            + 0.5
-                * (std::f64::consts::PI * offset / (center as f64 + 1.0)).cos();
+        let hanning = 0.5 + 0.5 * (std::f64::consts::PI * offset / (center as f64 + 1.0)).cos();
         *value = sum / SPECTRUM_SAMPLES as f64 * hanning;
         direct_current += *value;
     }
@@ -965,9 +970,8 @@ fn design_narrow(standard: Standard) -> [i32; NARROW_TAPS] {
             (2.0 * std::f64::consts::PI * cutoff * offset as f64).sin()
                 / (std::f64::consts::PI * offset as f64)
         };
-        let hanning = 0.5
-            + 0.5
-                * (std::f64::consts::PI * offset as f64 / (center as f64 + 1.0)).cos();
+        let hanning =
+            0.5 + 0.5 * (std::f64::consts::PI * offset as f64 / (center as f64 + 1.0)).cos();
         *value = sinc * hanning;
         sum += *value;
     }
@@ -1022,8 +1026,7 @@ fn cti_row(luma: &[u16], u: &mut [i32], v: &mut [i32]) {
         let luma_before =
             (i32::from(luma[left - 2]) + i32::from(luma[left - 1]) + i32::from(luma[left])) / 3;
         let luma_after =
-            (i32::from(luma[right]) + i32::from(luma[right + 1]) + i32::from(luma[right + 2]))
-                / 3;
+            (i32::from(luma[right]) + i32::from(luma[right + 1]) + i32::from(luma[right + 2])) / 3;
         let luma_delta = luma_after - luma_before;
         if luma_delta.abs() > 4_096 {
             for chroma in [&mut *u, &mut *v] {
@@ -1031,12 +1034,11 @@ fn cti_row(luma: &[u16], u: &mut [i32], v: &mut [i32]) {
                 let after = (chroma[right] + chroma[right + 1] + chroma[right + 2]) / 3;
                 if (after - before).abs() > STEP_THRESHOLD {
                     for index in left..=right {
-                        let progress = ((i64::from(luma[index]) - i64::from(luma_before))
-                            * 32_768
+                        let progress = ((i64::from(luma[index]) - i64::from(luma_before)) * 32_768
                             / i64::from(luma_delta))
                         .clamp(0, 32_768);
-                        chroma[index] = before
-                            + ((i64::from(after - before) * progress) >> 15) as i32;
+                        chroma[index] =
+                            before + ((i64::from(after - before) * progress) >> 15) as i32;
                     }
                 }
             }
@@ -1065,12 +1067,15 @@ fn builtin_lut(
 fn uses_transform(standard: Standard, mode: DecodeMode, ntsc_mode: NtscTemporalMode) -> bool {
     matches!(
         (standard, mode, ntsc_mode),
-        (Standard::Pal, DecodeMode::SpatialComb | DecodeMode::TemporalTransform, _)
-            | (
-                Standard::Ntsc,
-                DecodeMode::TemporalTransform,
-                NtscTemporalMode::Transform | NtscTemporalMode::Hybrid,
-            )
+        (
+            Standard::Pal,
+            DecodeMode::SpatialComb | DecodeMode::TemporalTransform,
+            _
+        ) | (
+            Standard::Ntsc,
+            DecodeMode::TemporalTransform,
+            NtscTemporalMode::Transform | NtscTemporalMode::Hybrid,
+        )
     )
 }
 
