@@ -77,7 +77,11 @@ impl SeparationSettings {
                 }
             }
             SeparationRule::TrainedLut(values) => {
-                let ratio = if high <= f32::EPSILON { 1.0 } else { low / high };
+                let ratio = if high <= f32::EPSILON {
+                    1.0
+                } else {
+                    low / high
+                };
                 let position = ratio.clamp(0.0, 1.0) * (LUT_KNOTS - 1) as f32;
                 let knot = position.floor() as usize;
                 let lower = knot.min(LUT_KNOTS - 2);
@@ -199,14 +203,23 @@ impl Transform2d {
                 } else {
                     LEVEL_BLACK
                 };
-                destination[y * PAL_2D_WIDTH + x] = Complex32::new(sample * self.window[y * PAL_2D_WIDTH + x], 0.0);
+                destination[y * PAL_2D_WIDTH + x] =
+                    Complex32::new(sample * self.window[y * PAL_2D_WIDTH + x], 0.0);
             }
         }
     }
 
     fn fft_2d(&self, tile: &mut [Complex32], line: &mut [Complex32], inverse: bool) {
-        let x_plan = if inverse { &self.inverse_x } else { &self.forward_x };
-        let y_plan = if inverse { &self.inverse_y } else { &self.forward_y };
+        let x_plan = if inverse {
+            &self.inverse_x
+        } else {
+            &self.forward_x
+        };
+        let y_plan = if inverse {
+            &self.inverse_y
+        } else {
+            &self.forward_y
+        };
         for row in tile[..PAL_2D_WIDTH * PAL_2D_HEIGHT].chunks_exact_mut(PAL_2D_WIDTH) {
             x_plan.process(row);
         }
@@ -246,12 +259,18 @@ impl Transform2d {
                 let reflected_energy = magnitude_squared(input[reflected]);
                 let low = source_energy.min(reflected_energy);
                 let high = source_energy.max(reflected_energy);
-                let ratio = if high <= f32::EPSILON { 1.0 } else { low / high };
+                let ratio = if high <= f32::EPSILON {
+                    1.0
+                } else {
+                    low / high
+                };
                 let low_frequency_x = PAL_2D_WIDTH / 4 - x;
                 let first_y = (PAL_2D_HEIGHT / 4 + PAL_2D_HEIGHT - y) % PAL_2D_HEIGHT;
                 let second_y = (3 * PAL_2D_HEIGHT / 4 + PAL_2D_HEIGHT - y) % PAL_2D_HEIGHT;
                 let evidence = magnitude_squared(input[first_y * PAL_2D_WIDTH + low_frequency_x])
-                    .max(magnitude_squared(input[second_y * PAL_2D_WIDTH + low_frequency_x]));
+                    .max(magnitude_squared(
+                        input[second_y * PAL_2D_WIDTH + low_frequency_x],
+                    ));
                 let evidence_gain = self.settings.evidence_gain(evidence, high);
                 let gain = self.settings.gain(bin, low, high) * evidence_gain;
                 output[index] = input[index] * gain;
@@ -440,9 +459,21 @@ impl Transform3d {
     }
 
     fn fft_3d(&self, tile: &mut [Complex32], line: &mut [Complex32], inverse: bool) {
-        let x_plan = if inverse { &self.inverse_x } else { &self.forward_x };
-        let y_plan = if inverse { &self.inverse_y } else { &self.forward_y };
-        let z_plan = if inverse { &self.inverse_z } else { &self.forward_z };
+        let x_plan = if inverse {
+            &self.inverse_x
+        } else {
+            &self.forward_x
+        };
+        let y_plan = if inverse {
+            &self.inverse_y
+        } else {
+            &self.forward_y
+        };
+        let z_plan = if inverse {
+            &self.inverse_z
+        } else {
+            &self.forward_z
+        };
         let length = THREE_D_DEPTH * self.y_size * THREE_D_WIDTH;
         let tile = &mut tile[..length];
         for slab in tile.chunks_exact_mut(self.y_size * THREE_D_WIDTH) {
@@ -506,7 +537,11 @@ impl Transform3d {
                     let reflected_energy = magnitude_squared(input[reflected]);
                     let low = source_energy.min(reflected_energy);
                     let high = source_energy.max(reflected_energy);
-                    let ratio = if high <= f32::EPSILON { 1.0 } else { low / high };
+                    let ratio = if high <= f32::EPSILON {
+                        1.0
+                    } else {
+                        low / high
+                    };
                     let evidence = self.low_frequency_evidence(input, z, y, x);
                     let evidence_gain = self.settings.evidence_gain(evidence, high);
                     let gain = self.settings.gain(bin, low, high) * evidence_gain;
@@ -538,7 +573,9 @@ impl Transform3d {
             return false;
         }
         match self.standard {
-            TemporalStandard::Pal => z == THREE_D_DEPTH / 2 && (y == self.y_size / 4 || y == 3 * self.y_size / 4),
+            TemporalStandard::Pal => {
+                z == THREE_D_DEPTH / 2 && (y == self.y_size / 4 || y == 3 * self.y_size / 4)
+            }
             TemporalStandard::Ntsc => {
                 (z == THREE_D_DEPTH / 4 && y == self.y_size / 4)
                     || (z == 3 * THREE_D_DEPTH / 4 && y == 3 * self.y_size / 4)
@@ -614,7 +651,8 @@ fn make_window_3d(width: usize, height: usize, depth: usize) -> Box<[f32]> {
     for z in 0..depth {
         for y in 0..height {
             for x in 0..width {
-                values[(z * height + y) * width + x] = hann(z, depth) * hann(y, height) * hann(x, width);
+                values[(z * height + y) * width + x] =
+                    hann(z, depth) * hann(y, height) * hann(x, width);
             }
         }
     }

@@ -9,13 +9,13 @@ mod lut;
 #[path = "transform.rs"]
 mod transform;
 
+use self::transform::{
+    LUT_KNOTS, NTSC_3D_BINS, PAL_2D_BINS, PAL_3D_BINS, SeparationRule, SeparationSettings,
+    TemporalStandard, Transform2d, Transform3d, TransformScratch,
+};
 use crate::encode::{level_parameters, round_div};
 use crate::model::{FrameIndex, GraySink, GraySource, Plane, PlaneMut, Setup, Standard, YuvSink};
 use crate::subcarrier::{line_phase, sine_table};
-use self::transform::{
-    SeparationRule, SeparationSettings, TemporalStandard, Transform2d, Transform3d, TransformScratch,
-    LUT_KNOTS, NTSC_3D_BINS, PAL_2D_BINS, PAL_3D_BINS,
-};
 
 const MAX_WIDTH: usize = 928;
 const COLOR_TAPS: [i32; 17] = [
@@ -228,7 +228,11 @@ impl DecodeScratch {
     }
 
     /// Writes one diagnostic image from the most recent decode into `output`.
-    pub fn write_mask<D: GraySink>(&mut self, kind: MaskKind, output: &mut D) -> Result<(), DecodeError> {
+    pub fn write_mask<D: GraySink>(
+        &mut self,
+        kind: MaskKind,
+        output: &mut D,
+    ) -> Result<(), DecodeError> {
         if output.dimensions() != (self.width, self.height) {
             return Err(DecodeError::MaskGeometry {
                 expected: (self.width, self.height),
@@ -237,20 +241,31 @@ impl DecodeScratch {
         }
         match kind {
             MaskKind::Motion if !self.has_motion => return Err(DecodeError::MaskUnavailable(kind)),
-            MaskKind::Confidence if !self.has_confidence => return Err(DecodeError::MaskUnavailable(kind)),
+            MaskKind::Confidence if !self.has_confidence => {
+                return Err(DecodeError::MaskUnavailable(kind));
+            }
             _ => {}
         }
         for row in 0..self.height {
             let start = row * self.width;
             match kind {
                 MaskKind::Motion => {
-                    for (destination, &value) in self.mask_row.iter_mut().zip(&self.motion[start..start + self.width]) {
+                    for (destination, &value) in self
+                        .mask_row
+                        .iter_mut()
+                        .zip(&self.motion[start..start + self.width])
+                    {
                         *destination = u16::from(value) * u16::MAX;
                     }
                 }
                 MaskKind::Confidence => {
-                    for (destination, &value) in self.mask_row.iter_mut().zip(&self.confidence[start..start + self.width]) {
-                        *destination = ((1.0 - value.clamp(0.0, 1.0)) * f32::from(u16::MAX)).round() as u16;
+                    for (destination, &value) in self
+                        .mask_row
+                        .iter_mut()
+                        .zip(&self.confidence[start..start + self.width])
+                    {
+                        *destination =
+                            ((1.0 - value.clamp(0.0, 1.0)) * f32::from(u16::MAX)).round() as u16;
                     }
                 }
             }
@@ -298,7 +313,11 @@ impl Decoder {
     }
 
     /// Validates options and creates immutable FFT plans and signal constants.
-    pub fn with_options(standard: Standard, setup: Setup, options: DecoderOptions) -> Result<Self, DecodeConfigError> {
+    pub fn with_options(
+        standard: Standard,
+        setup: Setup,
+        options: DecoderOptions,
+    ) -> Result<Self, DecodeConfigError> {
         let DecoderOptions {
             mode,
             threshold,
@@ -573,7 +592,10 @@ impl Decoder {
         let (width, height) = source.dimensions();
         for row in 0..height {
             let start = row * width;
-            bandpass(source.row(row), &mut scratch.separated[start..start + width]);
+            bandpass(
+                source.row(row),
+                &mut scratch.separated[start..start + width],
+            );
         }
         quantize_chroma(&scratch.separated, &mut scratch.chroma);
     }
@@ -609,7 +631,8 @@ impl Decoder {
                 );
                 scratch.has_confidence = true;
                 quantize_chroma(&scratch.separated, &mut scratch.chroma);
-                if self.standard == Standard::Ntsc && self.ntsc_temporal == NtscTemporalMode::Hybrid {
+                if self.standard == Standard::Ntsc && self.ntsc_temporal == NtscTemporalMode::Hybrid
+                {
                     self.separate_spatial(frames[4], &mut scratch.comb);
                     self.apply_hybrid_motion(frames[3], frames[4], frames[5], scratch);
                 }
@@ -662,8 +685,10 @@ impl Decoder {
                 let right = (x + 2).min(width - 1);
                 let mut difference = 0_i32;
                 for sample in left..=right {
-                    difference = difference.max((i32::from(now[sample]) - i32::from(before[sample])).abs());
-                    difference = difference.max((i32::from(now[sample]) - i32::from(after[sample])).abs());
+                    difference =
+                        difference.max((i32::from(now[sample]) - i32::from(before[sample])).abs());
+                    difference =
+                        difference.max((i32::from(now[sample]) - i32::from(after[sample])).abs());
                 }
                 let use_transform = difference as f32 >= self.comb_range;
                 scratch.motion[start + x] = u8::from(use_transform);
@@ -717,9 +742,13 @@ impl Decoder {
             carrier.v_switch * sin,
         ];
         for x in 0..width {
-            let demod_u = -((i64::from(p[x]) * i64::from(-cos) + i64::from(q[x]) * i64::from(-sin) + 8_192) >> 14) as i32;
+            let demod_u =
+                -((i64::from(p[x]) * i64::from(-cos) + i64::from(q[x]) * i64::from(-sin) + 8_192)
+                    >> 14) as i32;
             let demod_v = carrier.v_switch
-                * (-((i64::from(q[x]) * i64::from(-cos) - i64::from(p[x]) * i64::from(-sin) + 8_192) >> 14) as i32);
+                * (-((i64::from(q[x]) * i64::from(-cos) - i64::from(p[x]) * i64::from(-sin)
+                    + 8_192)
+                    >> 14) as i32);
             let resynthesized = (demod_u * sine4[x & 3] + demod_v * cosine4[x & 3] + 16_384) >> 15;
             let luma_level = i32::from(composite[x])
                 - if self.mode == DecodeMode::Notch {
@@ -748,9 +777,11 @@ fn builtin_lut(
     match (standard, mode, ntsc_mode) {
         (Standard::Pal, DecodeMode::SpatialComb, _) => Some(lut::pal_2d()),
         (Standard::Pal, DecodeMode::TemporalTransform, _) => Some(lut::pal_3d()),
-        (Standard::Ntsc, DecodeMode::TemporalTransform, NtscTemporalMode::Transform | NtscTemporalMode::Hybrid) => {
-            Some(lut::ntsc_3d())
-        }
+        (
+            Standard::Ntsc,
+            DecodeMode::TemporalTransform,
+            NtscTemporalMode::Transform | NtscTemporalMode::Hybrid,
+        ) => Some(lut::ntsc_3d()),
         _ => None,
     }
 }
@@ -758,7 +789,11 @@ fn builtin_lut(
 fn uses_transform(standard: Standard, mode: DecodeMode, ntsc_mode: NtscTemporalMode) -> bool {
     match (standard, mode, ntsc_mode) {
         (Standard::Pal, DecodeMode::SpatialComb | DecodeMode::TemporalTransform, _) => true,
-        (Standard::Ntsc, DecodeMode::TemporalTransform, NtscTemporalMode::Transform | NtscTemporalMode::Hybrid) => true,
+        (
+            Standard::Ntsc,
+            DecodeMode::TemporalTransform,
+            NtscTemporalMode::Transform | NtscTemporalMode::Hybrid,
+        ) => true,
         _ => false,
     }
 }
@@ -767,9 +802,11 @@ fn lut_length(standard: Standard, mode: DecodeMode, ntsc_mode: NtscTemporalMode)
     match (standard, mode, ntsc_mode) {
         (Standard::Pal, DecodeMode::SpatialComb, _) => PAL_2D_BINS * LUT_KNOTS,
         (Standard::Pal, DecodeMode::TemporalTransform, _) => PAL_3D_BINS * LUT_KNOTS,
-        (Standard::Ntsc, DecodeMode::TemporalTransform, NtscTemporalMode::Transform | NtscTemporalMode::Hybrid) => {
-            NTSC_3D_BINS * LUT_KNOTS
-        }
+        (
+            Standard::Ntsc,
+            DecodeMode::TemporalTransform,
+            NtscTemporalMode::Transform | NtscTemporalMode::Hybrid,
+        ) => NTSC_3D_BINS * LUT_KNOTS,
         _ => 0,
     }
 }
@@ -777,7 +814,11 @@ fn lut_length(standard: Standard, mode: DecodeMode, ntsc_mode: NtscTemporalMode)
 fn report(scratch: &DecodeScratch) -> DecodeReport {
     let confidence = if scratch.has_confidence {
         let count = scratch.confidence.len() as f64;
-        let sum = scratch.confidence.iter().map(|&value| f64::from(value)).sum::<f64>();
+        let sum = scratch
+            .confidence
+            .iter()
+            .map(|&value| f64::from(value))
+            .sum::<f64>();
         let mean = sum / count;
         let variance = scratch
             .confidence
@@ -793,7 +834,14 @@ fn report(scratch: &DecodeScratch) -> DecodeReport {
         (None, None)
     };
     let motion_fraction = if scratch.has_motion {
-        Some(scratch.motion.iter().map(|&value| f64::from(value)).sum::<f64>() / scratch.motion.len() as f64)
+        Some(
+            scratch
+                .motion
+                .iter()
+                .map(|&value| f64::from(value))
+                .sum::<f64>()
+                / scratch.motion.len() as f64,
+        )
     } else {
         None
     };
@@ -807,7 +855,9 @@ fn report(scratch: &DecodeScratch) -> DecodeReport {
 fn quantize_chroma(source: &[f32], destination: &mut [i32]) {
     debug_assert_eq!(source.len(), destination.len());
     for (destination, &value) in destination.iter_mut().zip(source) {
-        *destination = value.round().clamp(f32::from(i16::MIN), f32::from(i16::MAX)) as i32;
+        *destination = value
+            .round()
+            .clamp(f32::from(i16::MIN), f32::from(i16::MAX)) as i32;
     }
 }
 
@@ -847,7 +897,8 @@ fn spatial_comb(current: &[f32], previous: &[f32], next: &[f32], range: f32, out
                 weight_next = 0.0;
             }
             (2.0 / (weight_next + weight_previous)).max(1.0)
-        } else if (previous[x].abs() - next[x].abs()).abs() <= ((next[x] + previous[x]) * 0.2).abs() {
+        } else if (previous[x].abs() - next[x].abs()).abs() <= ((next[x] + previous[x]) * 0.2).abs()
+        {
             weight_previous = 1.0;
             weight_next = 1.0;
             1.0
@@ -857,7 +908,9 @@ fn spatial_comb(current: &[f32], previous: &[f32], next: &[f32], range: f32, out
         let value = ((current[x] - previous[x]) * weight_previous * scale
             + (current[x] - next[x]) * weight_next * scale)
             * 0.25;
-        output[x] = value.round().clamp(f32::from(i16::MIN), f32::from(i16::MAX)) as i32;
+        output[x] = value
+            .round()
+            .clamp(f32::from(i16::MIN), f32::from(i16::MAX)) as i32;
     }
 }
 
@@ -919,17 +972,23 @@ pub enum DecodeConfigError {
 impl std::fmt::Display for DecodeConfigError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            Self::UnsupportedDimensions(value) => write!(f, "dimensions must be 1, 2, or 3, got {value}"),
+            Self::UnsupportedDimensions(value) => {
+                write!(f, "dimensions must be 1, 2, or 3, got {value}")
+            }
             Self::InvalidThreshold(value) => write!(f, "threshold must be in (0, 1], got {value}"),
             Self::InvalidEvidence(value) => write!(f, "evidence must be non-negative, got {value}"),
             Self::UnsupportedEvidence => f.write_str("evidence needs a PAL spectral transform"),
-            Self::ThresholdsNeedTransform => f.write_str("per-bin thresholds need a spectral transform"),
+            Self::ThresholdsNeedTransform => {
+                f.write_str("per-bin thresholds need a spectral transform")
+            }
             Self::ThresholdLength { expected, actual } => {
                 write!(f, "per-bin thresholds need {expected} values, got {actual}")
             }
             Self::InvalidThresholdValue => f.write_str("per-bin thresholds must be in (0, 1]"),
             Self::LutNeedsTransform => f.write_str("a trained LUT needs a spectral transform"),
-            Self::LutLength { expected, actual } => write!(f, "trained LUT needs {expected} values, got {actual}"),
+            Self::LutLength { expected, actual } => {
+                write!(f, "trained LUT needs {expected} values, got {actual}")
+            }
             Self::InvalidLutValue => f.write_str("trained LUT values must be in [0, 1]"),
         }
     }
@@ -1008,30 +1067,57 @@ pub enum DecodeError {
 impl std::fmt::Display for DecodeError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            Self::PlaneGeometry { expected_width, composite, y, u, v } => write!(
+            Self::PlaneGeometry {
+                expected_width,
+                composite,
+                y,
+                u,
+                v,
+            } => write!(
                 f,
                 "decoder needs matching {expected_width}-sample planes; composite={composite:?}, Y={y:?}, U={u:?}, V={v:?}"
             ),
-            Self::RasterPlacement { row_offset, rows, raster_height } => write!(
+            Self::RasterPlacement {
+                row_offset,
+                rows,
+                raster_height,
+            } => write!(
                 f,
                 "rows {row_offset}..{} exceed the {raster_height}-line raster",
                 row_offset + rows
             ),
-            Self::TemporalFramesRequired => f.write_str("this decoder needs a temporal frame window"),
-            Self::TemporalWindow { expected, frames, indices } => write!(
+            Self::TemporalFramesRequired => {
+                f.write_str("this decoder needs a temporal frame window")
+            }
+            Self::TemporalWindow {
+                expected,
+                frames,
+                indices,
+            } => write!(
                 f,
                 "decoder needs {expected} temporal frames and indices, got {frames} frames and {indices} indices"
             ),
             Self::TemporalGeometry { expected, actual } => {
-                write!(f, "temporal frame geometry must match {expected:?}, got {actual:?}")
+                write!(
+                    f,
+                    "temporal frame geometry must match {expected:?}, got {actual:?}"
+                )
             }
-            Self::ScratchSizeOverflow { width, height } => write!(f, "scratch dimensions overflow: {width}x{height}"),
+            Self::ScratchSizeOverflow { width, height } => {
+                write!(f, "scratch dimensions overflow: {width}x{height}")
+            }
             Self::ScratchGeometry { expected, actual } => {
                 write!(f, "scratch is {expected:?}, decode requested {actual:?}")
             }
-            Self::MaskUnavailable(MaskKind::Motion) => f.write_str("motion mask needs NTSC temporal hybrid mode"),
-            Self::MaskUnavailable(MaskKind::Confidence) => f.write_str("confidence mask needs a spectral transform"),
-            Self::MaskGeometry { expected, actual } => write!(f, "mask is {actual:?}, decode is {expected:?}"),
+            Self::MaskUnavailable(MaskKind::Motion) => {
+                f.write_str("motion mask needs NTSC temporal hybrid mode")
+            }
+            Self::MaskUnavailable(MaskKind::Confidence) => {
+                f.write_str("confidence mask needs a spectral transform")
+            }
+            Self::MaskGeometry { expected, actual } => {
+                write!(f, "mask is {actual:?}, decode is {expected:?}")
+            }
         }
     }
 }
@@ -1067,7 +1153,9 @@ mod tests {
 
     #[test]
     fn pal_lut_has_its_documented_shape() {
-        let options = DecoderOptions::new(DecodeMode::SpatialComb).with_lut(vec![1.0; PAL_2D_BINS * LUT_KNOTS]);
+        let options =
+            DecoderOptions::new(DecodeMode::SpatialComb)
+                .with_lut(vec![1.0; PAL_2D_BINS * LUT_KNOTS]);
         assert!(Decoder::with_options(Standard::Pal, Setup::None, options).is_ok());
     }
 }

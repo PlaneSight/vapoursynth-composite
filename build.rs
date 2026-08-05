@@ -1,3 +1,5 @@
+//! Builds the calibrated LUT data embedded by the Rust plugin.
+
 use std::fmt::Write as _;
 use std::fs;
 use std::path::PathBuf;
@@ -74,16 +76,20 @@ fn run() -> Result<(), String> {
 
     let mut generated = String::from("// Generated from src/lut_tables.c by build.rs.\n");
     for table in &tables {
-        writeln!(generated, "pub(crate) static {}: [f32; {}] = [", table.rust_name, table.length)
-            .map_err(|error| error.to_string())?;
+        writeln!(
+            generated,
+            "pub(crate) static {}: [f32; {}] = [",
+            table.rust_name, table.length
+        )
+        .map_err(|error| error.to_string())?;
         for value in parse_table(&source, table)? {
             writeln!(generated, "    {value}_f32,").map_err(|error| error.to_string())?;
         }
         generated.push_str("];\n");
     }
 
-    let output_directory = std::env::var_os("OUT_DIR").ok_or_else(|| "missing OUT_DIR".to_owned())?;
-    let destination = PathBuf::from(output_directory)
-        .join("builtin_lut.rs");
+    let output_directory =
+        std::env::var_os("OUT_DIR").ok_or_else(|| "missing OUT_DIR".to_owned())?;
+    let destination = PathBuf::from(output_directory).join("builtin_lut.rs");
     fs::write(destination, generated).map_err(|error| error.to_string())
 }
