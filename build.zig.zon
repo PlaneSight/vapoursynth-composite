@@ -1,0 +1,13 @@
+.{
+    .name = .vapoursynth_composite,
+    .version = "0.2.0",
+    .fingerprint = 0x887b2ba3043ee8c6,
+    .minimum_zig_version = "0.16.0",
+    .paths = .{""},
+    .dependencies = .{
+        .vapoursynth = .{
+            .url = "https://codeload.github.com/dnjulek/vapoursynth-zig/tar.gz/b87ff61",
+            .hash = "vapoursynth-4.0.0-jLYMQ6DjAgDFOODh8tdhWCw0iGHMPKiR4znTJwSyvV36",
+        },
+    },
+}

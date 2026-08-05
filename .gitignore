@@ -1,4 +1,8 @@
 build*/
+zig-cache/
+.zig-cache/
+zig-out/
+zig-pkg/
 __pycache__/
 subprojects/checkasm/
 threshold_hists_*.npz
