@@ -1,95 +1,129 @@
 # vapoursynth-composite
 
-PAL and NTSC composite-video encoding and restoration for VapourSynth, written
-in Rust on top of [`vapoursynth-rs`](https://github.com/rust-av/vapoursynth-rs).
+PAL and NTSC composite-video encoding and restoration for VapourSynth. The
+production implementation is an Edition 2024 Rust `cdylib` built on
+[`vapoursynth-rs`](https://github.com/rust-av/vapoursynth-rs).
 
-The Rust implementation is deliberately split into two layers:
+The project deliberately separates a host-independent signal core from a
+small VapourSynth adapter. The core owns signal geometry, modulation,
+spectral separation, calibrated gain tables, and reusable workspaces; the
+adapter owns format conversion, temporal frame requests, and frame
+properties. That keeps the hot pixel paths allocation-free and confines host
+ABI work to one documented module.
 
-- a host-independent signal core with explicit raster, phase, level, and plane
-  contracts;
-- a narrow VapourSynth adapter that owns frame requests and format validation.
+## Capabilities
 
-The current Rust milestone implements exact colour-frame phase generation,
-fixed-point PAL/NTSC modulation, a one-line notch reference decoder, and an
-adaptive same-field spatial comb. The earlier C implementation's temporal
-Transform separator, trained LUTs, confidence masks, refinement loop, and
-arbitrary-width internal resampling are not yet part of the Rust API. The
-plugin rejects unsupported modes instead of silently substituting a weaker
-algorithm.
+- PAL and NTSC fixed-point composite encoding, including colour-frame phase
+  sequencing and NTSC setup.
+- `dimensions=1` notch reference, `dimensions=2` spatial separation, and
+  `dimensions=3` calibrated temporal spectral separation.
+- Built-in PAL 2D/3D and NTSC 3D gain tables, generated into the Rust build
+  from the retained calibration source; the C implementation is never
+  compiled or linked by Cargo.
+- NTSC temporal comb, transform, and motion-routed hybrid policies.
+- Fixed and leak-aware chroma equalization, luma-guided CTI, confidence and
+  motion diagnostics, and iterative `Restore` luma refinement.
+- BT.601-to-4fsc and 4fsc-to-BT.601 horizontal Spline36 geometry, including
+  edge splicing for restored output at ordinary widths.
 
-## Build
+The legacy C sources and their calibration/test corpus remain in the tree as
+a parity oracle. Cargo is the canonical build and CI contract. No unmeasured
+speedup or bit-exact cross-implementation claim is made.
 
-Install current stable Rust (the crate's MSRV is 1.85), then run:
+## Build and install
+
+Install Rust 1.88 or newer, then build:
 
 ```sh
 cargo build --release
 ```
 
-The plugin is written to `target/release` as `libvapoursynth_composite.so` on
-Linux, `libvapoursynth_composite.dylib` on macOS, or
-`vapoursynth_composite.dll` on Windows. Rename the Unix library to
-`composite.so`/`composite.dylib` when installing it in VapourSynth's plugin
-directory.
+The plugin artifact is `libvapoursynth_composite.so` on Linux,
+`libvapoursynth_composite.dylib` on macOS, and `vapoursynth_composite.dll` on
+Windows. Install it in VapourSynth's plugin directory (rename the Unix
+artifact to `composite.so` or `composite.dylib` if required by that layout).
 
-The crate does not link against VapourSynth. The host supplies the API table
-when it loads the plugin, which keeps cross-platform builds reproducible.
+The plugin dynamically receives VapourSynth's API table from the host; it does
+not link the host library. `Encode` and `Restore` use VapourSynth's standard
+`com.vapoursynth.resize` plugin for their input conversion, so that plugin must
+be available at script construction time.
 
-## Input contract
+## Input and output contracts
 
-This milestone accepts the composite raster directly:
+| Filter | Input | Output |
+|---|---|---|
+| `Encode` | Constant-dimension YUV at any ordinary width/format | 4fsc `GRAY16` composite raster |
+| `Decode` | 4fsc `GRAY16` composite raster | `YUV444P16`, 720 pixels wide by default |
+| `Restore` | Constant-dimension YUV at any ordinary width/format | `YUV444P16` at the input width by default |
 
-| Standard | Input/output width | Height | Format |
-|---|---:|---:|---|
-| PAL | 928 | 576 | `YUV444P16` for `Encode`/`Restore`, `GRAY16` for `Decode` |
-| NTSC | 758 | 480 or 486 | `YUV444P16` for `Encode`/`Restore`, `GRAY16` for `Decode` |
+Raw widths are 928 for PAL and 758 for NTSC. `width=0` requests raw 4fsc
+output from `Decode` or `Restore`; otherwise `Decode` defaults to 720 and
+`Restore` defaults to its input width. PAL uses 576 lines. NTSC accepts the
+standard 480- or 486-line rasters; `_FieldBased=2` selects top-field-first
+placement for 480 lines, with the DV placement used otherwise.
 
-For NTSC 480-line input, `_FieldBased=2` selects the top-field-first raster
-placement. Missing, progressive, or bottom-field-first metadata uses the
-480-line DV placement.
-
-Use VapourSynth's resize plugin explicitly before and after the filter when
-working on ordinary BT.601 widths. Making the resampling geometry explicit is
-preferable to hiding a second filter graph while the Rust resampler is still
-under differential validation.
-
-## Filters
+## VapourSynth use
 
 ```python
 import vapoursynth as vs
 
 core = vs.core
 
-# `clip` is already YUV444P16 on the 4fsc raster.
-composite = core.composite.Encode(
-    clip,
-    standard="ntsc",
-    setup=0,
-    precomb=0,
-)
+# `clip` can be an ordinary constant-dimension YUV source.
+composite = core.composite.Encode(clip, standard="ntsc", setup=0)
 
+# Three-dimensional NTSC hybrid separation is the default.
 decoded = core.composite.Decode(
     composite,
     standard="ntsc",
-    setup=0,
-    dimensions=2,
+    dimensions=3,
+    transform=2,
+    eq=2,
+    mask="motion",
 )
 
+# A requested diagnostic mask is attached to the decoded frame.
+motion = core.std.PropToClip(decoded, prop="CompositeMask")
+
+# Restore encodes, separates, optionally refines luma, then returns BT.601.
 restored = core.composite.Restore(
     clip,
     standard="ntsc",
-    setup=0,
-    precomb=0,
-    dimensions=2,
+    dimensions=3,
+    transform=2,
+    refine=1,
 )
 ```
 
-`dimensions=1` selects the notch reference decoder. `dimensions=2` selects the
-adaptive spatial comb and is the default. Other values are rejected until the
-temporal implementation reaches parity with the previous measured corpus.
+`mask="motion"` is available for NTSC `dimensions=3, transform=2`.
+`mask="confidence"` is available with leak-aware equalization (`eq=2`).
+`vapoursynth-rs`'s safe filter constructor has one clip output, so the selected
+mask is carried as the `CompositeMask` frame property and can be extracted
+with `PropToClip`. The picture frame also carries
+`CompositeSeparationConfidenceMean`, `CompositeSeparationConfidenceStdDev`,
+`CompositeMotionFraction`, and, for `Restore`, `CompositeRefineResidual` and
+`CompositeRefineCorrection` when applicable.
+
+## Decode controls
+
+| Control | Values | Meaning |
+|---|---|---|
+| `dimensions` | `1`, `2`, `3` | Notch, spatial, or temporal separation; default `3` |
+| `transform` | `0`, `1`, `2` | NTSC comb, transform, or hybrid; default `2` for temporal NTSC |
+| `eq` | `0`, `1`, `2` | Off, fixed, or leak-aware chroma equalization |
+| `threshold` / `thresholds` | scalar / per-bin | Hard spectral-separation thresholds |
+| `lut` | 0–1 gain values | Custom trained gain table; mutually exclusive with thresholds and `level=1` |
+| `level` | `0`, `1` | Threshold or amplitude-limiting separation mode |
+| `evidence` | non-negative float | PAL low-frequency luma-evidence prior |
+| `cti` | `0`, `1` | Luma-guided chroma transient improvement |
+| `refine` | `0`–`16` | `Restore` luma-refinement iterations; default `1` |
+
+The built-in calibrated tables are selected automatically when no custom
+separation control is supplied. Their expected custom lengths are 1,280 for
+PAL 2D, 6,144 for PAL 3D, and 12,288 for NTSC 3D; a supplied table is checked
+at filter construction time.
 
 ## Development contract
-
-The quick gate is:
 
 ```sh
 cargo fmt --all --check
@@ -97,11 +131,12 @@ cargo check --all-targets
 cargo clippy --all-targets -- -D warnings
 cargo test --all-targets
 cargo test --all-targets --release
+cargo build --release
 ```
 
-CI runs the build on Linux, Windows, and macOS. Performance claims require a
-release benchmark against the preserved C baseline on the same machine; no
-speedup is claimed before that comparison exists.
+CI executes that contract on Linux, Windows, and macOS. Performance work must
+use release-mode measurements against the retained C reference on the same
+machine and corpus.
 
 ## License
 
