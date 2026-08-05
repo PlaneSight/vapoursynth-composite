@@ -5,6 +5,11 @@
 //! here, while the decoder itself receives a checked source window.
 
 #![allow(unsafe_code)]
+// `make_filter_function!` expands each public VapourSynth option into a
+// constructor parameter. Those ABI-facing constructors intentionally exceed
+// Clippy's generic parameter-count heuristic; keep that exception inside the
+// adapter instead of weakening the signal core's lint policy.
+#![allow(clippy::too_many_arguments)]
 
 use std::sync::Mutex;
 
@@ -1097,9 +1102,6 @@ make_filter_function! {
     }
 }
 
-// Decode deliberately mirrors the public VapourSynth contract, whose distinct
-// named arguments exceed Clippy's generic function-parameter heuristic.
-#[allow(clippy::too_many_arguments)]
 make_filter_function! {
     DecodeFunction, "Decode"
     fn create_decode<'core>(
@@ -1163,9 +1165,6 @@ make_filter_function! {
     }
 }
 
-// Restore deliberately mirrors the public VapourSynth contract, whose distinct
-// named arguments exceed Clippy's generic function-parameter heuristic.
-#[allow(clippy::too_many_arguments)]
 make_filter_function! {
     RestoreFunction, "Restore"
     fn create_restore<'core>(
