@@ -12,7 +12,7 @@ use anyhow::{Error, anyhow, bail, ensure};
 use vapoursynth::core::CoreRef;
 use vapoursynth::format::{ColorFamily, PresetFormat, SampleType};
 use vapoursynth::map::ValueIter;
-use vapoursynth::plugins::{Filter, FrameContext, Metadata};
+use vapoursynth::plugins::{Filter, FilterArgument, FrameContext, Metadata};
 use vapoursynth::prelude::*;
 use vapoursynth::video_info::{Property, Resolution, VideoInfo};
 use vapoursynth::{export_vapoursynth_plugin, make_filter_function};
@@ -192,10 +192,10 @@ fn parse_decoder_options(
         "eq=2 needs a transform separation"
     );
     let cti = cti.unwrap_or(0) != 0;
-    ensure!(cti == false || mode != DecodeMode::Notch, "cti needs dimensions 2 or 3");
+    ensure!(!cti || mode != DecodeMode::Notch, "cti needs dimensions 2 or 3");
     let amplitude_limit = level.unwrap_or(0) != 0;
     ensure!(
-        amplitude_limit == false || has_transform,
+        !amplitude_limit || has_transform,
         "level=1 needs a transform separation"
     );
 
@@ -801,15 +801,20 @@ impl<'core> Filter<'core> for DecodeFilter<'core> {
             .work
             .lock()
             .map_err(|_| anyhow!("decode workspace lock was poisoned"))?;
-        let (report, source) = decode_requested_window(
-            &self.decoder,
-            self.standard,
-            &self.source,
-            context,
-            n,
-            &mut work.scratch,
-            &mut work.decoded,
-        )?;
+        let (report, source) = {
+            let DecodeWork {
+                scratch, decoded, ..
+            } = &mut *work;
+            decode_requested_window(
+                &self.decoder,
+                self.standard,
+                &self.source,
+                context,
+                n,
+                scratch,
+                decoded,
+            )?
+        };
         let resolution = match self.output.resolution {
             Property::Constant(resolution) => resolution,
             Property::Variable => unreachable!("filter output dimensions are constant"),
@@ -817,7 +822,8 @@ impl<'core> Filter<'core> for DecodeFilter<'core> {
         let mut output = new_frame(core, &source, PresetFormat::YUV444P16, resolution)?;
         write_yuv(&work.decoded, &mut output, self.picture_resampler.as_ref());
         let mask = if let Some(kind) = self.mask_kind {
-            work.scratch.write_mask(kind, &mut work.mask)?;
+            let DecodeWork { scratch, mask, .. } = &mut *work;
+            scratch.write_mask(kind, mask)?;
             let mut frame = new_frame(core, &source, PresetFormat::Gray16, resolution)?;
             write_gray(&work.mask, &mut frame, self.mask_resampler.as_ref());
             Some(FrameRef::from(frame))
@@ -960,7 +966,7 @@ impl<'core> Filter<'core> for RestoreFilter<'core> {
         let look = self.decoder.look();
         let frame_count = self.source.info().num_frames;
         let count = look * 2 + 1;
-        let mut frames = fetch_window(&self.source, context, n, look, frame_count)?;
+        let frames = fetch_window(&self.source, context, n, look, frame_count)?;
         let current = frames[look]
             .as_ref()
             .ok_or_else(|| anyhow!("center source frame {n} was not returned"))?;
@@ -985,15 +991,23 @@ impl<'core> Filter<'core> for RestoreFilter<'core> {
                 work.composites[slot].samples.fill(0);
             }
         }
-        let window: [&dyn GraySource; MAX_TEMPORAL_WINDOW] =
-            std::array::from_fn(|slot| &work.composites[slot] as &dyn GraySource);
-        let report = self.decoder.decode_window_with_scratch(
-            current_offset,
-            &window[..count],
-            &indices[..count],
-            &mut work.decoded,
-            &mut work.scratch,
-        )?;
+        let report = {
+            let RestoreWork {
+                composites,
+                decoded,
+                scratch,
+                ..
+            } = &mut *work;
+            let window: [&dyn GraySource; MAX_TEMPORAL_WINDOW] =
+                std::array::from_fn(|slot| &composites[slot] as &dyn GraySource);
+            self.decoder.decode_window_with_scratch(
+                current_offset,
+                &window[..count],
+                &indices[..count],
+                decoded,
+                scratch,
+            )?
+        };
         let refinement = if self.refine > 0 {
             Some(refine_luma(
                 &self.refine_encoder,
@@ -1025,7 +1039,8 @@ impl<'core> Filter<'core> for RestoreFilter<'core> {
             );
         }
         let mask = if let Some(kind) = self.mask_kind {
-            work.scratch.write_mask(kind, &mut work.mask)?;
+            let RestoreWork { scratch, mask, .. } = &mut *work;
+            scratch.write_mask(kind, mask)?;
             let mut frame = new_frame(core, current, PresetFormat::Gray16, resolution)?;
             write_gray(&work.mask, &mut frame, self.mask_resampler.as_ref());
             Some(FrameRef::from(frame))
