@@ -298,7 +298,7 @@ impl Transform2d {
         height: usize,
         tile: &[Complex32],
         output: &mut [f32],
-        confidence: Option<&mut [f32]>,
+        mut confidence: Option<&mut [f32]>,
         tile_confidence: f32,
     ) {
         let normalization = (PAL_2D_WIDTH * PAL_2D_HEIGHT) as f32;
@@ -380,7 +380,7 @@ impl Transform3d {
         &self,
         frames: &[&dyn GraySource],
         chroma: &mut [f32],
-        mut confidence: Option<&mut [f32]>,
+        confidence: Option<&mut [f32]>,
         scratch: &mut TransformScratch,
     ) {
         debug_assert_eq!(frames.len(), 9);
