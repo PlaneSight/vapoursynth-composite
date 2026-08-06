@@ -129,14 +129,18 @@ at filter construction time.
 cargo fmt --all --check
 cargo check --all-targets
 cargo clippy --all-targets -- -D warnings
-cargo test --all-targets
-cargo test --all-targets --release
+cargo test --lib --tests
+cargo test --lib --tests --release
 cargo build --release
+cargo bench --bench core
 ```
 
-CI executes that contract on Linux, Windows, and macOS. Performance work must
-use release-mode measurements against the retained C reference on the same
-machine and corpus.
+CI compiles every Cargo target and executes the library and integration tests
+on Linux, Windows, and macOS. The standalone benchmark target is run on Linux
+in release mode; it is intentionally kept out of the ordinary test command so
+benchmark execution cannot be mistaken for a correctness check. Performance
+work must use release-mode measurements against the retained C reference on
+the same machine and corpus.
 
 ## License
 

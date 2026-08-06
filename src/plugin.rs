@@ -11,8 +11,6 @@
 // adapter instead of weakening the signal core's lint policy.
 #![allow(clippy::too_many_arguments)]
 
-use std::sync::Mutex;
-
 use anyhow::{Error, anyhow, bail, ensure};
 use vapoursynth::core::CoreRef;
 use vapoursynth::format::{ColorFamily, PresetFormat, SampleType};
@@ -32,6 +30,7 @@ use self::resample::{
 use crate::decode::{
     DecodeReport, DecodeScratch, DecoderOptions, EqualizerMode, MaskKind, NtscTemporalMode,
 };
+use crate::work_pool::WorkPool;
 use crate::{
     DecodeMode, Decoder, Encoder, FrameIndex, GraySink, GraySource, Setup, Standard, YuvSink,
     YuvSource,
@@ -788,7 +787,7 @@ struct DecodeFilter<'core> {
     picture_resampler: Option<HorizontalResampler>,
     mask_resampler: Option<HorizontalBilinearResampler>,
     mask_kind: Option<MaskKind>,
-    work: Mutex<DecodeWork>,
+    work: WorkPool<DecodeWork>,
 }
 
 impl<'core> Filter<'core> for DecodeFilter<'core> {
@@ -820,10 +819,7 @@ impl<'core> Filter<'core> for DecodeFilter<'core> {
         context: FrameContext,
         n: usize,
     ) -> Result<FrameRef<'core>, Error> {
-        let mut work = self
-            .work
-            .lock()
-            .map_err(|_| anyhow!("decode workspace lock was poisoned"))?;
+        let mut work = self.work.checkout()?;
         let (report, source) = {
             let DecodeWork {
                 scratch, decoded, ..
@@ -954,7 +950,7 @@ struct RestoreFilter<'core> {
     mask_resampler: Option<HorizontalBilinearResampler>,
     edge_columns: (usize, usize),
     mask_kind: Option<MaskKind>,
-    work: Mutex<RestoreWork>,
+    work: WorkPool<RestoreWork>,
 }
 
 impl<'core> Filter<'core> for RestoreFilter<'core> {
@@ -1000,10 +996,7 @@ impl<'core> Filter<'core> for RestoreFilter<'core> {
         let indices: [FrameIndex; MAX_TEMPORAL_WINDOW] = std::array::from_fn(|slot| {
             FrameIndex(window_frame_index(n, look, slot, frame_count).unwrap_or(n))
         });
-        let mut work = self
-            .work
-            .lock()
-            .map_err(|_| anyhow!("restore workspace lock was poisoned"))?;
+        let mut work = self.work.checkout()?;
         for slot in 0..count {
             if let Some(source) = frames[slot].as_ref() {
                 let offset = row_offset(self.standard, source)?;
@@ -1149,6 +1142,8 @@ make_filter_function! {
             PresetFormat::YUV444P16,
             output_geometry.resolution,
         )?;
+        let work_width = contract.resolution.width;
+        let work_height = contract.resolution.height;
         Ok(Some(Box::new(DecodeFilter {
             source: clip,
             output,
@@ -1157,10 +1152,7 @@ make_filter_function! {
             picture_resampler: output_geometry.picture_resampler,
             mask_resampler: output_geometry.mask_resampler,
             mask_kind,
-            work: Mutex::new(DecodeWork::new(
-                contract.resolution.width,
-                contract.resolution.height,
-            )?),
+            work: WorkPool::new(move || DecodeWork::new(work_width, work_height))?,
         })))
     }
 }
@@ -1234,6 +1226,8 @@ make_filter_function! {
             PresetFormat::YUV444P16,
             output_geometry.resolution,
         )?;
+        let work_width = contract.resolution.width;
+        let work_height = contract.resolution.height;
         Ok(Some(Box::new(RestoreFilter {
             source,
             edge_source,
@@ -1248,10 +1242,7 @@ make_filter_function! {
             mask_resampler: output_geometry.mask_resampler,
             edge_columns: output_geometry.edge_columns,
             mask_kind,
-            work: Mutex::new(RestoreWork::new(
-                contract.resolution.width,
-                contract.resolution.height,
-            )?),
+            work: WorkPool::new(move || RestoreWork::new(work_width, work_height))?,
         })))
     }
 }

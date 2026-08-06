@@ -41,11 +41,15 @@ jobs:
         run: cargo clippy --all-targets -- -D warnings
 
       - name: Test debug
-        run: cargo test --all-targets
+        run: cargo test --lib --tests
 
       - name: Test release
         if: runner.os == 'Linux'
-        run: cargo test --all-targets --release
+        run: cargo test --lib --tests --release
+
+      - name: Benchmark core
+        if: runner.os == 'Linux'
+        run: cargo bench --bench core
 
       - name: Build plugin
         run: cargo build --release
