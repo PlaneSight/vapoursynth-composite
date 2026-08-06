@@ -11,6 +11,7 @@ mod encode;
 mod model;
 mod plugin;
 mod subcarrier;
+mod work_pool;
 
 pub use decode::{
     DecodeConfigError, DecodeError, DecodeMode, DecodeReport, DecodeScratch, Decoder,

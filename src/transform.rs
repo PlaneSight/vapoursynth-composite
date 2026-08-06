@@ -23,6 +23,46 @@ const THREE_D_WIDTH: usize = 16;
 const THREE_D_DEPTH: usize = 8;
 const LEVEL_BLACK: f32 = 16_384.0;
 
+fn horizontal_overlap(
+    tile_x: isize,
+    tile_width: usize,
+    source_width: usize,
+) -> (usize, usize, usize) {
+    let destination_start = (-tile_x).max(0).min(tile_width as isize) as usize;
+    let destination_end = (tile_width as isize)
+        .min(source_width as isize - tile_x)
+        .max(0) as usize;
+    let source_start = (tile_x + destination_start as isize) as usize;
+    (destination_start, destination_end, source_start)
+}
+
+fn load_windowed_row(
+    source: Option<&[u16]>,
+    destination: &mut [Complex32],
+    window: &[f32],
+    destination_start: usize,
+    destination_end: usize,
+    source_start: usize,
+) {
+    debug_assert_eq!(destination.len(), window.len());
+    for (value, &weight) in destination.iter_mut().zip(window) {
+        *value = Complex32::new(LEVEL_BLACK * weight, 0.0);
+    }
+
+    let Some(source) = source else {
+        return;
+    };
+    let copy_length = destination_end - destination_start;
+    debug_assert!(source_start + copy_length <= source.len());
+    for ((destination, &sample), &weight) in destination[destination_start..destination_end]
+        .iter_mut()
+        .zip(&source[source_start..source_start + copy_length])
+        .zip(&window[destination_start..destination_end])
+    {
+        *destination = Complex32::new(f32::from(sample) * weight, 0.0);
+    }
+}
+
 /// The per-bin policy used to retain chroma-like spectral energy.
 #[derive(Clone, Debug)]
 pub(crate) enum SeparationRule {
@@ -190,22 +230,24 @@ impl Transform2d {
         destination: &mut [Complex32],
     ) {
         let (width, height) = input.dimensions();
+        let (destination_start, destination_end, source_start) =
+            horizontal_overlap(tile_x, PAL_2D_WIDTH, width);
         for y in 0..PAL_2D_HEIGHT {
             let source_y = tile_y + y as isize;
-            for x in 0..PAL_2D_WIDTH {
-                let source_x = tile_x + x as isize;
-                let sample = if source_x >= 0
-                    && source_x < width as isize
-                    && source_y >= 0
-                    && source_y < height as isize
-                {
-                    input.row(source_y as usize)[source_x as usize] as f32
-                } else {
-                    LEVEL_BLACK
-                };
-                destination[y * PAL_2D_WIDTH + x] =
-                    Complex32::new(sample * self.window[y * PAL_2D_WIDTH + x], 0.0);
-            }
+            let source_row = if source_y >= 0 && source_y < height as isize {
+                Some(input.row(source_y as usize))
+            } else {
+                None
+            };
+            let row_start = y * PAL_2D_WIDTH;
+            load_windowed_row(
+                source_row,
+                &mut destination[row_start..row_start + PAL_2D_WIDTH],
+                &self.window[row_start..row_start + PAL_2D_WIDTH],
+                destination_start,
+                destination_end,
+                source_start,
+            );
         }
     }
 
@@ -436,24 +478,26 @@ impl Transform3d {
         destination: &mut [Complex32],
     ) {
         let (width, height) = frames[4].dimensions();
+        let (destination_start, destination_end, source_start) =
+            horizontal_overlap(tile_x, THREE_D_WIDTH, width);
         for z in 0..THREE_D_DEPTH {
             let source = frames[frame_offset + z];
             for y in 0..self.y_size {
                 let source_y = tile_y + y as isize;
-                for x in 0..THREE_D_WIDTH {
-                    let source_x = tile_x + x as isize;
-                    let sample = if source_x >= 0
-                        && source_x < width as isize
-                        && source_y >= 0
-                        && source_y < height as isize
-                    {
-                        source.row(source_y as usize)[source_x as usize] as f32
-                    } else {
-                        LEVEL_BLACK
-                    };
-                    let index = self.index(z, y, x);
-                    destination[index] = Complex32::new(sample * self.window[index], 0.0);
-                }
+                let source_row = if source_y >= 0 && source_y < height as isize {
+                    Some(source.row(source_y as usize))
+                } else {
+                    None
+                };
+                let row_start = self.index(z, y, 0);
+                load_windowed_row(
+                    source_row,
+                    &mut destination[row_start..row_start + THREE_D_WIDTH],
+                    &self.window[row_start..row_start + THREE_D_WIDTH],
+                    destination_start,
+                    destination_end,
+                    source_start,
+                );
             }
         }
     }
@@ -672,6 +716,41 @@ fn hann(index: usize, length: usize) -> f32 {
 mod tests {
     use super::*;
 
+    struct TestSource {
+        width: usize,
+        height: usize,
+        samples: Vec<u16>,
+    }
+
+    impl TestSource {
+        fn new(width: usize, height: usize) -> Self {
+            let samples = (0..width * height)
+                .map(|index| (index as u16).wrapping_mul(37).wrapping_add(1_000))
+                .collect();
+            Self {
+                width,
+                height,
+                samples,
+            }
+        }
+    }
+
+    impl GraySource for TestSource {
+        fn dimensions(&self) -> (usize, usize) {
+            (self.width, self.height)
+        }
+
+        fn row(&self, row: usize) -> &[u16] {
+            let start = row * self.width;
+            &self.samples[start..start + self.width]
+        }
+    }
+
+    fn assert_loaded_sample(actual: Complex32, expected: f32) {
+        assert!((actual.re - expected).abs() < 0.001);
+        assert_eq!(actual.im, 0.0);
+    }
+
     #[test]
     fn lut_interpolation_preserves_endpoint_gain() {
         let lut = Arc::<[f32]>::from(vec![0.25; PAL_2D_BINS * LUT_KNOTS]);
@@ -684,5 +763,74 @@ mod tests {
     fn temporal_window_has_nonzero_center() {
         let window = make_window_3d(THREE_D_WIDTH, 16, THREE_D_DEPTH);
         assert!(window[(4 * 16) * THREE_D_WIDTH] > 0.0);
+    }
+
+    #[test]
+    fn two_dimensional_loader_matches_black_padded_reference() {
+        let source = TestSource::new(19, 13);
+        let transform = Transform2d::new(SeparationSettings::new(
+            0.4,
+            0.0,
+            SeparationRule::Threshold,
+        ));
+        let mut tile = vec![Complex32::new(0.0, 0.0); PAL_2D_WIDTH * PAL_2D_HEIGHT];
+
+        for &tile_x in &[-16_isize, -3, 0, 15] {
+            for &tile_y in &[-8_isize, -2, 0, 9] {
+                transform.load_2d_tile(&source, tile_x, tile_y, &mut tile);
+                for y in 0..PAL_2D_HEIGHT {
+                    for x in 0..PAL_2D_WIDTH {
+                        let source_x = tile_x + x as isize;
+                        let source_y = tile_y + y as isize;
+                        let sample = if source_x >= 0
+                            && source_x < source.width as isize
+                            && source_y >= 0
+                            && source_y < source.height as isize
+                        {
+                            f32::from(source.row(source_y as usize)[source_x as usize])
+                        } else {
+                            LEVEL_BLACK
+                        };
+                        let index = y * PAL_2D_WIDTH + x;
+                        assert_loaded_sample(tile[index], sample * transform.window[index]);
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn three_dimensional_loader_uses_the_same_padded_rows() {
+        let source = TestSource::new(19, 37);
+        let frames: [&dyn GraySource; THREE_D_DEPTH + 1] =
+            std::array::from_fn(|_| &source as &dyn GraySource);
+        let transform = Transform3d::new(
+            SeparationSettings::new(0.4, 0.0, SeparationRule::Threshold),
+            TemporalStandard::Pal,
+        );
+        let mut tile = vec![Complex32::new(0.0, 0.0); THREE_D_DEPTH * 16 * THREE_D_WIDTH];
+
+        for &tile_x in &[-8_isize, -1, 0, 11] {
+            for &tile_y in &[-8_isize, -2, 0, 25] {
+                transform.load_3d_tile(&frames, 0, tile_x, tile_y, &mut tile);
+                for y in 0..transform.y_size {
+                    for x in 0..THREE_D_WIDTH {
+                        let source_x = tile_x + x as isize;
+                        let source_y = tile_y + y as isize;
+                        let sample = if source_x >= 0
+                            && source_x < source.width as isize
+                            && source_y >= 0
+                            && source_y < source.height as isize
+                        {
+                            f32::from(source.row(source_y as usize)[source_x as usize])
+                        } else {
+                            LEVEL_BLACK
+                        };
+                        let index = transform.index(0, y, x);
+                        assert_loaded_sample(tile[index], sample * transform.window[index]);
+                    }
+                }
+            }
+        }
     }
 }

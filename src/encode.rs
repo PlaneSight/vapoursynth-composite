@@ -265,17 +265,58 @@ fn fir_chroma_row(input: &[u16], taps: &[i32], output: &mut [i32]) {
     debug_assert_eq!(input.len(), output.len());
     debug_assert!(taps.len() <= MAX_TAPS);
     let radius = taps.len() / 2;
-    for (x, destination) in output.iter_mut().enumerate() {
-        let mut accumulator = 0_i64;
-        for (tap_index, &tap) in taps.iter().enumerate() {
-            let source = x + tap_index;
-            if source < radius || source - radius >= input.len() {
-                continue;
-            }
-            accumulator += i64::from(tap) * i64::from(i32::from(input[source - radius]) - 32_768);
+    let length = input.len();
+    let interior_start = radius.min(length);
+    let interior_end = length.saturating_sub(radius);
+
+    if interior_start >= interior_end {
+        for x in 0..length {
+            output[x] = fir_chroma_edge(input, taps, radius, x);
         }
-        *destination = ((accumulator + 16_384) >> 15) as i32;
+        return;
     }
+
+    for x in 0..interior_start {
+        output[x] = fir_chroma_edge(input, taps, radius, x);
+    }
+    for x in interior_start..interior_end {
+        output[x] = fir_chroma_interior(input, taps, radius, x);
+    }
+    for x in interior_end..length {
+        output[x] = fir_chroma_edge(input, taps, radius, x);
+    }
+}
+
+fn fir_chroma_edge(input: &[u16], taps: &[i32], radius: usize, x: usize) -> i32 {
+    let first_tap = radius.saturating_sub(x);
+    let last_tap = (input.len() + radius - x).min(taps.len());
+    let mut accumulator = 0_i64;
+    for (tap_index, &tap) in taps[first_tap..last_tap].iter().enumerate() {
+        let sample = input[x + first_tap + tap_index - radius];
+        accumulator += i64::from(tap) * i64::from(i32::from(sample) - 32_768);
+    }
+    ((accumulator + 16_384) >> 15) as i32
+}
+
+fn fir_chroma_interior(input: &[u16], taps: &[i32], radius: usize, x: usize) -> i32 {
+    let samples = &input[x - radius..x + radius + 1];
+    let (tap_chunks, tap_tail) = taps.as_chunks::<4>();
+    let (sample_chunks, sample_tail) = samples.as_chunks::<4>();
+    let mut accumulator = 0_i64;
+    for (tap_chunk, sample_chunk) in tap_chunks.iter().zip(sample_chunks) {
+        accumulator += i64::from(tap_chunk[0])
+            * i64::from(i32::from(sample_chunk[0]) - 32_768);
+        accumulator += i64::from(tap_chunk[1])
+            * i64::from(i32::from(sample_chunk[1]) - 32_768);
+        accumulator += i64::from(tap_chunk[2])
+            * i64::from(i32::from(sample_chunk[2]) - 32_768);
+        accumulator += i64::from(tap_chunk[3])
+            * i64::from(i32::from(sample_chunk[3]) - 32_768);
+    }
+    for (&tap, &sample) in tap_tail.iter().zip(sample_tail) {
+        accumulator += i64::from(tap) * i64::from(i32::from(sample) - 32_768);
+    }
+    ((accumulator + 16_384) >> 15) as i32
 }
 
 pub(crate) fn round_div(numerator: i64, denominator: i32) -> i32 {
@@ -359,6 +400,21 @@ impl std::error::Error for EncodeError {}
 mod tests {
     use super::*;
 
+    fn fir_chroma_row_reference(input: &[u16], taps: &[i32], output: &mut [i32]) {
+        for (x, destination) in output.iter_mut().enumerate() {
+            let mut accumulator = 0_i64;
+            for (tap_index, &tap) in taps.iter().enumerate() {
+                let source = x + tap_index;
+                if source < taps.len() / 2 || source - taps.len() / 2 >= input.len() {
+                    continue;
+                }
+                accumulator += i64::from(tap)
+                    * i64::from(i32::from(input[source - taps.len() / 2]) - 32_768);
+            }
+            *destination = ((accumulator + 16_384) >> 15) as i32;
+        }
+    }
+
     #[test]
     fn chroma_filters_preserve_a_flat_signal() {
         for taps in [&PAL_UV_TAPS[..], &NTSC_UV_TAPS[..]] {
@@ -367,6 +423,22 @@ mod tests {
             fir_chroma_row(&input, taps, &mut output);
             for value in &output[taps.len()..64 - taps.len()] {
                 assert_eq!(*value, 7_232);
+            }
+        }
+    }
+
+    #[test]
+    fn split_chroma_filter_matches_reference_at_all_boundaries() {
+        for taps in [&PAL_UV_TAPS[..], &NTSC_UV_TAPS[..]] {
+            for length in 0..=40 {
+                let input: Vec<_> = (0..length)
+                    .map(|index| (index * 4_123 + 7_000) as u16)
+                    .collect();
+                let mut expected = vec![0_i32; length];
+                let mut actual = vec![0_i32; length];
+                fir_chroma_row_reference(&input, taps, &mut expected);
+                fir_chroma_row(&input, taps, &mut actual);
+                assert_eq!(actual, expected, "length={length}, taps={}", taps.len());
             }
         }
     }
