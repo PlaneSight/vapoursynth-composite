@@ -18,17 +18,16 @@ ABI work to one documented module.
 - `dimensions=1` notch reference, `dimensions=2` spatial separation, and
   `dimensions=3` calibrated temporal spectral separation.
 - Built-in PAL 2D/3D and NTSC 3D gain tables, generated into the Rust build
-  from the retained calibration source; the C implementation is never
-  compiled or linked by Cargo.
+  from the reviewed calibration inputs under `data/`.
 - NTSC temporal comb, transform, and motion-routed hybrid policies.
 - Fixed and leak-aware chroma equalization, luma-guided CTI, confidence and
   motion diagnostics, and iterative `Restore` luma refinement.
 - BT.601-to-4fsc and 4fsc-to-BT.601 horizontal Spline36 geometry, including
   edge splicing for restored output at ordinary widths.
 
-The legacy C sources and their calibration/test corpus remain in the tree as
-a parity oracle. Cargo is the canonical build and CI contract. No unmeasured
-speedup or bit-exact cross-implementation claim is made.
+Cargo is the only build and CI contract. The repository contains one
+implementation and one host integration: Rust plus VapourSynth. No
+unmeasured speedup or bit-exact cross-implementation claim is made.
 
 ## Build and install
 
@@ -133,14 +132,18 @@ cargo test --lib --tests
 cargo test --lib --tests --release
 cargo build --release
 cargo bench --bench core
+
+# Optional VapourSynth host-level smoke test; requires Python VapourSynth
+# and NumPy after building the release plugin.
+python tests/vapoursynth_plugin.py target/release/libvapoursynth_composite.so
 ```
 
 CI compiles every Cargo target and executes the library and integration tests
 on Linux, Windows, and macOS. The standalone benchmark target is run on Linux
 in release mode; it is intentionally kept out of the ordinary test command so
-benchmark execution cannot be mistaken for a correctness check. Performance
-work must use release-mode measurements against the retained C reference on
-the same machine and corpus.
+benchmark execution cannot be mistaken for a correctness check. The
+corpus-quality and calibration tools under `tools/` are deliberately separate
+from the ordinary Rust correctness test command.
 
 ## License
 

@@ -14,7 +14,7 @@
 # L*g^2 + alpha*C*(1-g)^2 is the Wiener gain alpha*C / (L + alpha*C) —
 # closed form, no iteration.
 #
-# usage: calibrate_thresholds.py composite.so corpus_dirs [frames_per_clip] [2d|3d|ntsc]
+# usage: calibrate_thresholds.py plugin.so corpus_dirs [frames_per_clip] [2d|3d|ntsc]
 # 2d/3d calibrate Transform PAL on the 625-line corpus (3d on the
 # displaced field-line lattice the plugin separates on); ntsc
 # calibrates Transform NTSC 3D on the 525-line corpus (per-bin t0
@@ -370,7 +370,10 @@ for path in train:
                            hist_lum, hist_chr, rows=rows, parity=parity)
     print(f'  trained on {os.path.basename(path)}')
 
-np.savez(f'threshold_hists_{MODE}.npz', lum=hist_lum, chr=hist_chr)
+OUTPUT_DIR = os.environ.get('CALIBRATION_OUTPUT_DIR', os.path.join('build', 'calibration'))
+os.makedirs(OUTPUT_DIR, exist_ok=True)
+np.savez(os.path.join(OUTPUT_DIR, f'threshold_hists_{MODE}.npz'),
+         lum=hist_lum, chr=hist_chr)
 cands = {a: optimal_thresholds(hist_lum, hist_chr, a) for a in (0.5, 1.0, 2.0, 4.0)}
 luts = {a: wiener_lut(hist_lum, hist_chr, a) for a in (0.5, 1.0, 2.0, 4.0)}
 th = cands[ALPHA]
@@ -409,9 +412,11 @@ for path in held:
                  lut=list(la.ravel()), **tf)
 
 prefix = 'ntsc' if MODE == 'ntsc' else f'pal_{MODE}'
-np.savetxt(f'thresholds_{prefix}.txt' if MODE == 'ntsc' else f'thresholds_pal_{MODE}.txt',
-           th, fmt='%.4f')
-np.savetxt(f'lut_{prefix}.txt' if MODE == 'ntsc' else f'lut_pal_{MODE}.txt',
-           luts[ALPHA].ravel(), fmt='%.4f')
+np.savetxt(os.path.join(OUTPUT_DIR,
+                        f'thresholds_{prefix}.txt' if MODE == 'ntsc'
+                        else f'thresholds_pal_{MODE}.txt'), th, fmt='%.4f')
+np.savetxt(os.path.join(OUTPUT_DIR,
+                        f'lut_{prefix}.txt' if MODE == 'ntsc'
+                        else f'lut_pal_{MODE}.txt'), luts[ALPHA].ravel(), fmt='%.4f')
 print(f'\nsaved calibrated thresholds and lut (alpha={ALPHA}) '
-      f'and threshold_hists_{MODE}.npz')
+      f'under {OUTPUT_DIR}')

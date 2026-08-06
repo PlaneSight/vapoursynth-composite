@@ -1,6 +1,8 @@
 build*/
+/target/
+/dist/
+/.venv/
 __pycache__/
-subprojects/checkasm/
 threshold_hists_*.npz
 
 # local dev documents; the repository carries shippable code only
@@ -8,5 +10,4 @@ threshold_hists_*.npz
 /TODO.md
 /ROADMAP.md
 /project_state.yaml
-/docs/
 *Zone.Identifier

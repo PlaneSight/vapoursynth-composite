@@ -53,9 +53,9 @@ fn main() {
 }
 
 fn run() -> Result<(), String> {
-    println!("cargo:rerun-if-changed=src/lut_tables.c");
+    println!("cargo:rerun-if-changed=data/lut_tables.inc");
 
-    let source = fs::read_to_string("src/lut_tables.c").map_err(|error| error.to_string())?;
+    let source = fs::read_to_string("data/lut_tables.inc").map_err(|error| error.to_string())?;
     let tables = [
         Table {
             source_name: "comp_lut_builtin_pal_2d",
@@ -74,7 +74,7 @@ fn run() -> Result<(), String> {
         },
     ];
 
-    let mut generated = String::from("// Generated from src/lut_tables.c by build.rs.\n");
+    let mut generated = String::from("// Generated from data/lut_tables.inc by build.rs.\n");
     for table in &tables {
         writeln!(
             generated,
