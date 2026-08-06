@@ -49,6 +49,10 @@ fn load_windowed_row(
         *value = Complex32::new(LEVEL_BLACK * weight, 0.0);
     }
 
+    if destination_start >= destination_end {
+        return;
+    }
+
     let Some(source) = source else {
         return;
     };

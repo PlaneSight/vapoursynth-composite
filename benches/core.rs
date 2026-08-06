@@ -55,10 +55,11 @@ fn benchmark_decode(standard: Standard, mode: DecodeMode) -> BenchResult<()> {
     measure(
         &format!("decode {:?} {:?}", standard, mode),
         || {
+            let composite_plane = Plane::new(&composite, width, height, width)?;
             decoder.decode_source_with_scratch(
                 FrameIndex(0),
                 0,
-                &Plane::new(&composite, width, height, width)?,
+                &composite_plane,
                 &mut PackedYuv {
                     y: &mut y,
                     u: &mut u,
@@ -126,10 +127,11 @@ fn benchmark_parallel_decode() -> BenchResult<()> {
                     let mut y = vec![0_u16; width * height];
                     let mut u = vec![0_u16; width * height];
                     let mut v = vec![0_u16; width * height];
+                    let composite_plane = Plane::new(&composite, width, height, width)?;
                     decoder.decode_source_with_scratch(
                         FrameIndex(0),
                         0,
-                        &Plane::new(&composite, width, height, width)?,
+                        &composite_plane,
                         &mut PackedYuv {
                             y: &mut y,
                             u: &mut u,
