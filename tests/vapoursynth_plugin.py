@@ -1,15 +1,17 @@
 #!/usr/bin/env python3
 # Plugin: registration, Encode()/Decode() PAL behavior, the round trip,
 # argument validation.
-# usage: test_composite.py path/to/composite.so
+# usage: vapoursynth_plugin.py path/to/plugin
 
 import sys
+from pathlib import Path
 
 import numpy as np
 import vapoursynth as vs
 
 core = vs.core
 core.std.LoadPlugin(sys.argv[1])
+ROOT = Path(__file__).resolve().parents[1]
 
 
 def flat(color, fmt=vs.YUV444P16, w=720, h=576, length=1):
@@ -230,8 +232,8 @@ else:
 
 # ---- defaults are the measured best settings, and adapt to the path
 import numpy as _np
-_lut3 = list(_np.loadtxt('test/lut_pal_3d.txt'))
-_lutn = list(_np.loadtxt('test/lut_ntsc.txt'))
+_lut3 = list(_np.loadtxt(ROOT / 'data/luts/pal-3d.txt'))
+_lutn = list(_np.loadtxt(ROOT / 'data/luts/ntsc-3d.txt'))
 d_def = core.composite.Decode(core.composite.Encode(pal_src))
 d_exp = core.composite.Decode(core.composite.Encode(pal_src),
                               dimensions=3, lut=_lut3, eq=2)
@@ -626,4 +628,4 @@ for src, std in ((flat([30000, 40960, 28672]), 'pal'), (bff9, 'ntsc')):
     else:
         assert False, 'expected confidence eq=2 error'
 
-print('test_composite: all tests passed')
+print('vapoursynth_plugin: all tests passed')
